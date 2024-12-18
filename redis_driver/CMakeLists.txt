@@ -11,22 +11,16 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(CMAKE_PREFIX_PATH= "~/rdk_install_flexiv")
 
-# BUILD SOURCES AND LIBRARY
-set(SOURCES 
-    driver_robot_only.cpp
-)
-
 # Create a library
 add_executable(${PROJECT_NAME} driver_robot_only.cpp)
 add_executable(${PROJECT_NAME}_with_gripper driver_with_flexiv_gripper.cpp)
 
 # Find flexiv_rdk INTERFACE library
-
 find_package(flexiv_rdk REQUIRED)
 
 # - hiredis
 find_library(HIREDIS_LIBRARY hiredis)
-
+find_path(HIREDIS_INCLUDE_DIR hiredis/hiredis.h REQUIRED)
 
 # - jsoncpp
 if (CMAKE_SYSTEM_NAME MATCHES Darwin) 
@@ -46,6 +40,7 @@ find_package(Eigen3 REQUIRED)
 set(flexiv_rizon4_redis_driver_INCLUDE_DIRS 
     ${EIGEN3_INCLUDE_DIR}
     ${JSONCPP_INCLUDE_DIRS}
+	${HIREDIS_INCLUDE_DIR}
 )
 
 # create libraries list

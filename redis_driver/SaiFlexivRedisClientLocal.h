@@ -1,5 +1,5 @@
-#ifndef CDATABASEREDISCLIENT_H
-#define CDATABASEREDISCLIENT_H
+#ifndef SAI_FLEXIV_REDIS_CLIENT_LOCAL_H
+#define SAI_FLEXIV_REDIS_CLIENT_LOCAL_H
 
 #include <Eigen/Core>
 #include <hiredis/hiredis.h>
@@ -10,6 +10,9 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+
+namespace Sai {
+namespace Flexiv {
 
 #define CHECK(X) if ( !X || X->type == REDIS_REPLY_ERROR ) { printf("Error\n"); exit(-1); }
 
@@ -530,5 +533,7 @@ bool CDatabaseRedisClient::hEigenFromStringArrayCustom(Eigen::MatrixBase<Derived
 	return true;
 }
 
+} // namespace Flexiv
+} // namespace Sai
 
-#endif //CDATABASEREDISCLIENT_H
+#endif //SAI_FLEXIV_REDIS_CLIENT_LOCAL_H
