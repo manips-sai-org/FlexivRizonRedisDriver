@@ -722,7 +722,8 @@ int main(int argc, char **argv) {
         return 1;
     }
     // config file path
-    std::string config_file_path = argv[1];
+    std::string config_file = argv[1];
+	std::string config_file_path = std::string(CONFIG_FOLDER) + "/" + config_file;
 	driver_config = Sai::Flexiv::loadConfig(config_file_path);
 
 	std::string redis_prefix = driver_config.redis_prefix.empty() ? "" : driver_config.redis_prefix + "::";

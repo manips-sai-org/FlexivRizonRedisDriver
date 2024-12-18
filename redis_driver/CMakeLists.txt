@@ -55,3 +55,6 @@ set(flexiv_rizon4_redis_driver_LIBRARIES
 include_directories( ${flexiv_rizon4_redis_driver_INCLUDE_DIRS} )
 target_link_libraries(${PROJECT_NAME} ${flexiv_rizon4_redis_driver_LIBRARIES})
 target_link_libraries(${PROJECT_NAME}_with_gripper ${flexiv_rizon4_redis_driver_LIBRARIES})
+
+set(CONFIG_FOLDER "${CMAKE_CURRENT_SOURCE_DIR}/config_folder")
+add_definitions(-DCONFIG_FOLDER="${CONFIG_FOLDER}")
