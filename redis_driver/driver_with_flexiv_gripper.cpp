@@ -12,7 +12,8 @@
 #include <unistd.h>
 
 #include "ButterworthFilter.h"
-#include "RedisClient.h"
+#include "SaiFlexivDriverConfig.h"
+#include "SaiFlexivRedisClientLocal.h"
 
 #include <flexiv/gripper.h>
 #include <flexiv/log.h>
@@ -103,7 +104,9 @@ Eigen::VectorXd gravity_vector{};
 Eigen::VectorXd coriolis{};
 Eigen::MatrixXd M_array{};
 std::vector<std::array<double, 7>> sensor_feedback;
-std::vector<string> key_names;
+std::array<double, 3> wrist_ft_sensed_force{};
+std::array<double, 3> wrist_ft_sensed_moment{};
+std::vector<std::string> key_names;
 // bool fDriverRunning = true;
 // void sighandler(int sig)
 // { fDriverRunning = false; }
@@ -112,8 +115,8 @@ std::vector<string> key_names;
 Eigen::Vector3d gripper_parameters =
     Eigen::Vector3d(0.06, 0.1, 10.0); // width in m, speed in m/s, force in N
 Eigen::Vector3d last_gripper_parameters = gripper_parameters;
-string gripper_mode = "o";
-string last_gripper_mode = gripper_mode;
+std::string gripper_mode = "o";
+std::string last_gripper_mode = gripper_mode;
 double gripper_width;
 double gripper_speed;
 double gripper_force;
@@ -185,7 +188,7 @@ Sai::Flexiv::DriverConfig driver_config;
 //   }
 // }
 
-const std::vector<string> limit_state{
+const std::vector<std::string> limit_state{
     "Safe",         "Soft Min",     "Hard Min",     "Soft Max",    "Hard Max",
     "Min Soft Vel", "Min Hard Vel", "Max Soft Vel", "Max Hard Vel"};
 
@@ -265,7 +268,7 @@ void PrintHelp() {
 /** @brief Callback function for realtime periodic task */
 void PeriodicTask(flexiv::Robot &robot, flexiv::Gripper &gripper,
                   flexiv::Model &model, flexiv::Log &log,
-                  CDatabaseRedisClient *redis_client) {
+                  Sai::Flexiv::CDatabaseRedisClient *redis_client) {
 
     try {
 
@@ -365,12 +368,20 @@ void PeriodicTask(flexiv::Robot &robot, flexiv::Gripper &gripper,
         redis_client->setGetBatchCommands(key_names, tau_cmd_array, MassMatrix,
                                           sensor_feedback);
         if (driver_config.robot_type == Sai::Flexiv::RobotType::RIZON_4S) {
-			double[3] sensed_force = {wrist_ft_sensed_array[0], wrist_ft_sensed_array[1], wrist_ft_sensed_array[2]};
-			double[3] sensed_moment = {wrist_ft_sensed_array[3], wrist_ft_sensed_array[4], wrist_ft_sensed_array[5]};
+            wrist_ft_sensed_force = {wrist_ft_sensed_array[0],
+                                     wrist_ft_sensed_array[1],
+                                     wrist_ft_sensed_array[2]};
+            wrist_ft_sensed_moment = {wrist_ft_sensed_array[3],
+                                      wrist_ft_sensed_array[4],
+                                      wrist_ft_sensed_array[5]};
             redis_client->setDoubleArray(WRIST_FORCE_SENSED_KEY,
-                                         sensed_force, 3);
-			redis_client->setDoubleArray(WRIST_MOMENT_SENSED_KEY,
-										 sensed_moment, 3);
+                                         wrist_ft_sensed_force, 3);
+            redis_client->setDoubleArray(WRIST_MOMENT_SENSED_KEY,
+                                         wrist_ft_sensed_moment, 3);
+            redis_client->setDoubleArray(WRIST_FORCE_SENSED_KEY,
+                                         wrist_ft_sensed_force, 3);
+            redis_client->setDoubleArray(WRIST_MOMENT_SENSED_KEY,
+                                         wrist_ft_sensed_moment, 3);
         }
         redis_client->setEigenMatrixDerived(ROBOT_GRAVITY_KEY, gravity_vector);
         redis_client->setEigenMatrixDerived(CORIOLIS_KEY, coriolis);
@@ -772,29 +783,53 @@ int main(int argc, char **argv) {
     }
     // config file path
     std::string config_file = argv[1];
-	std::string config_file_path = std::string(CONFIG_FOLDER) + "/" + config_file;
-	driver_config = Sai::Flexiv::loadConfig(config_file_path);
+    std::string config_file_path =
+        std::string(CONFIG_FOLDER) + "/" + config_file;
+    driver_config = Sai::Flexiv::loadConfig(config_file_path);
 
-	std::string redis_prefix = driver_config.redis_prefix.empty() ? "" : driver_config.redis_prefix + "::";
+    std::string redis_prefix = driver_config.redis_prefix.empty()
+                                   ? ""
+                                   : driver_config.redis_prefix + "::";
 
-    JOINT_TORQUES_COMMANDED_KEY = redis_prefix + "commands::" + driver_config.robot_name + "::control_torques";
-    JOINT_ANGLES_KEY = redis_prefix + "sensors::" + driver_config.robot_name + "::joint_positions";
-    JOINT_VELOCITIES_KEY = redis_prefix + "sensors::" + driver_config.robot_name + "::joint_velocities";
-    JOINT_TORQUES_SENSED_KEY = redis_prefix + "sensors::" + driver_config.robot_name + "::joint_torques";
-    MASSMATRIX_KEY = redis_prefix + "sensors::" + driver_config.robot_name + "::model::mass_matrix";
-    CORIOLIS_KEY = redis_prefix + "sensors::" + driver_config.robot_name + "::model::coriolis";
-    ROBOT_GRAVITY_KEY = redis_prefix + "sensors::" + driver_config.robot_name + "::model::robot_gravity";
-    SAFETY_TORQUES_LOGGING_KEY = redis_prefix + "redis_driver::" + driver_config.robot_name + "::safety_controller::safety_torques";
-    SENT_TORQUES_LOGGING_KEY = redis_prefix + "redis_driver::" + driver_config.robot_name + "::safety_controller::sent_torques";
-    CONSTRAINED_NULLSPACE_KEY = redis_prefix + "redis_driver::" + driver_config.robot_name + "::safety_controller::constraint_nullspace";
+    JOINT_TORQUES_COMMANDED_KEY = redis_prefix +
+                                  "commands::" + driver_config.robot_name +
+                                  "::control_torques";
+    JOINT_ANGLES_KEY = redis_prefix + "sensors::" + driver_config.robot_name +
+                       "::joint_positions";
+    JOINT_VELOCITIES_KEY = redis_prefix +
+                           "sensors::" + driver_config.robot_name +
+                           "::joint_velocities";
+    JOINT_TORQUES_SENSED_KEY = redis_prefix +
+                               "sensors::" + driver_config.robot_name +
+                               "::joint_torques";
+    MASSMATRIX_KEY = redis_prefix + "sensors::" + driver_config.robot_name +
+                     "::model::mass_matrix";
+    CORIOLIS_KEY = redis_prefix + "sensors::" + driver_config.robot_name +
+                   "::model::coriolis";
+    ROBOT_GRAVITY_KEY = redis_prefix + "sensors::" + driver_config.robot_name +
+                        "::model::robot_gravity";
+    SAFETY_TORQUES_LOGGING_KEY = redis_prefix +
+                                 "redis_driver::" + driver_config.robot_name +
+                                 "::safety_controller::safety_torques";
+    SENT_TORQUES_LOGGING_KEY = redis_prefix +
+                               "redis_driver::" + driver_config.robot_name +
+                               "::safety_controller::sent_torques";
+    CONSTRAINED_NULLSPACE_KEY = redis_prefix +
+                                "redis_driver::" + driver_config.robot_name +
+                                "::safety_controller::constraint_nullspace";
 
-    GRIPPER_PARAMETERS_COMMANDED_KEY = redsi_prefix + driver_config.robot_name + "::gripper::parameters";
-    GRIPPER_MODE_KEY = redis_prefix + config.robot_name + "::gripper::mode";
+    GRIPPER_PARAMETERS_COMMANDED_KEY =
+        redis_prefix + driver_config.robot_name + "::gripper::parameters";
+    GRIPPER_MODE_KEY =
+        redis_prefix + driver_config.robot_name + "::gripper::mode";
 
-
-    if (driverMOMENTg.robot_type == Sai::Flexiv::RobotType::RIZON_4S) {
-		WRIST_FORCE_SENSED_KEY = "sensors::" + config.robot_name + "::ft_sensor::" + config.link_name + "::force";
-		WRIST_MOMENT_SENSED_KEY = "sensors::" + config.robot_name + "::ft_sensor::" + config.link_name + "::moment"; 
+    if (driver_config.robot_type == Sai::Flexiv::RobotType::RIZON_4S) {
+        WRIST_FORCE_SENSED_KEY =
+            "sensors::" + driver_config.robot_name +
+            "::ft_sensor::" + driver_config.force_sensor_link_name + "::force";
+        WRIST_MOMENT_SENSED_KEY =
+            "sensors::" + driver_config.robot_name +
+            "::ft_sensor::" + driver_config.force_sensor_link_name + "::moment";
     }
 
     // start redis client
@@ -837,7 +872,7 @@ int main(int argc, char **argv) {
     sensor_feedback.push_back(dq_array);
     sensor_feedback.push_back(tau_sensed_array);
 
-    if (config.robot_type == Sai::Flexiv::RobotType::RIZON_4S) {
+    if (driver_config.robot_type == Sai::Flexiv::RobotType::RIZON_4S) {
         std::cout << "Using Rizon 4s specifications\n";
         // Rizon 4s specifications
         joint_position_max_default = {2.7925, 2.2689, 2.9670, 2.6878,
@@ -856,7 +891,7 @@ int main(int argc, char **argv) {
         pos_zones = {6., 9.}; // hard, soft
         // vel_zones = {5., 7.};  // hard, soft
         vel_zones = {6., 8.}; // hard, soft  (8, 6)
-    } else if (config.robot_type == Sai::Flexiv::RobotType::RIZON_4) {
+    } else if (driver_config.robot_type == Sai::Flexiv::RobotType::RIZON_4) {
         std::cout << "Using Rizon 4 specifications\n";
         // Rizon 4 specifications
         joint_position_max_default = {2.7925, 2.2689, 2.9670, 2.6878,
