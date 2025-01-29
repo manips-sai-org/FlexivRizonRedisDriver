@@ -11,7 +11,6 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#include "ButterworthFilter.h"
 #include "SaiFlexivDriverConfig.h"
 #include "SaiFlexivRedisClientLocal.h"
 
