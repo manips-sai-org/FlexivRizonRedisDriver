@@ -765,12 +765,12 @@ int main(int argc, char **argv) {
                                 "::safety_controller::constraint_nullspace";
 
     if (driver_config.robot_type == Sai::Flexiv::RobotType::RIZON_4S) {
-        WRIST_FORCE_SENSED_KEY =
-            "sensors::" + driver_config.robot_name +
-            "::ft_sensor::" + driver_config.force_sensor_link_name + "::force";
-        WRIST_MOMENT_SENSED_KEY =
-            "sensors::" + driver_config.robot_name +
-            "::ft_sensor::" + driver_config.force_sensor_link_name + "::moment";
+        WRIST_FORCE_SENSED_KEY = redis_prefix +
+                                 "sensors::" + driver_config.robot_name +
+                                 "::ft_sensor::force";
+        WRIST_MOMENT_SENSED_KEY = redis_prefix +
+                                  "sensors::" + driver_config.robot_name +
+                                  "::ft_sensor::moment";
     }
 
     // start redis client
