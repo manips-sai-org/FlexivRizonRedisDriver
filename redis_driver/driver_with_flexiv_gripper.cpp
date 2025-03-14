@@ -44,6 +44,8 @@ std::string WRIST_MOMENT_SENSED_KEY;
 std::string SAFETY_TORQUES_LOGGING_KEY;
 std::string SENT_TORQUES_LOGGING_KEY;
 std::string CONSTRAINED_NULLSPACE_KEY;
+std::string GRIPPER_CURRENT_WIDTH_KEY;
+std::string GRIPPER_SENSED_GRASP_FORCE_KEY;
 
 // user options
 const bool USING_4S =
@@ -105,6 +107,8 @@ Eigen::MatrixXd M_array{};
 std::vector<std::array<double, 7>> sensor_feedback;
 std::array<double, 3> wrist_ft_sensed_force{};
 std::array<double, 3> wrist_ft_sensed_moment{};
+std::array<double, 1> gripper_current_width{};
+std::array<double, 1> gripper_sensed_grasp_force{};
 std::vector<std::string> key_names;
 // bool fDriverRunning = true;
 // void sighandler(int sig)
@@ -291,10 +295,10 @@ void PeriodicTask(flexiv::Robot &robot, flexiv::Gripper &gripper,
         if (gripper_mode != last_gripper_mode) {
             if (gripper_mode == "g") {
                 log.Info("Closing Gripper");
-                gripper.Move(0, 0.1, 80);
+                gripper.Move(0, 0.1, 60);
             } else if (gripper_mode == "o") {
                 log.Info("Opening Gripper");
-                gripper.Move(0.05, 0.1, 80);
+                gripper.Move(0.05, 0.1, 60);
             } else {
                 log.Info("Invalid Gripper Command");
             }
@@ -345,6 +349,7 @@ void PeriodicTask(flexiv::Robot &robot, flexiv::Gripper &gripper,
 
         auto robot_state = robot.states();
         model.Update(robot_state.q, robot_state.dq);
+        auto gripper_state = gripper.states();
 
         // start = std::clock();
         sensor_feedback[0] = robot_state.q;
@@ -354,8 +359,10 @@ void PeriodicTask(flexiv::Robot &robot, flexiv::Gripper &gripper,
         wrist_ft_sensed_array = robot_state.ft_sensor_raw;
         gravity_vector = model.g();
         coriolis = model.c();
-
         MassMatrix = model.M();
+        gripper_current_width[0] = gripper_state.width;
+        gripper_sensed_grasp_force[0] = gripper_state.force;
+
         Eigen::Map<Eigen::Matrix<double, 7, 1>> _tau(tau_cmd_array.data());
         Eigen::Map<Eigen::Matrix<double, 7, 1>> _sensed_torques(
             sensor_feedback[2].data()); // sensed torques
@@ -384,6 +391,10 @@ void PeriodicTask(flexiv::Robot &robot, flexiv::Gripper &gripper,
         }
         redis_client->setEigenMatrixDerived(ROBOT_GRAVITY_KEY, gravity_vector);
         redis_client->setEigenMatrixDerived(CORIOLIS_KEY, coriolis);
+        redis_client->setDoubleArray(GRIPPER_CURRENT_WIDTH_KEY,
+                                     gripper_current_width, 1);
+        redis_client->setDoubleArray(GRIPPER_SENSED_GRASP_FORCE_KEY,
+                                     gripper_sensed_grasp_force, 1);
 
         // reset containers
         _limited_joints.setZero(); // used to form the constraint jacobian
@@ -817,10 +828,18 @@ int main(int argc, char **argv) {
                                 "redis_driver::" + driver_config.robot_name +
                                 "::safety_controller::constraint_nullspace";
 
-    GRIPPER_PARAMETERS_COMMANDED_KEY =
-        redis_prefix + driver_config.robot_name + "::gripper::parameters";
-    GRIPPER_MODE_KEY =
-        redis_prefix + driver_config.robot_name + "::gripper::mode";
+    GRIPPER_PARAMETERS_COMMANDED_KEY = redis_prefix +
+                                       "commands::" + driver_config.robot_name +
+                                       "::gripper::parameters";
+    GRIPPER_MODE_KEY = redis_prefix + "commands::" + driver_config.robot_name +
+                       "::gripper::mode";
+
+    GRIPPER_CURRENT_WIDTH_KEY = redis_prefix +
+                                "sensors::" + driver_config.robot_name +
+                                "::gripper::width";
+    GRIPPER_SENSED_GRASP_FORCE_KEY = redis_prefix +
+                                     "sensors::" + driver_config.robot_name +
+                                     "::gripper::grasp_force";
 
     if (driver_config.robot_type == Sai::Flexiv::RobotType::RIZON_4S) {
         WRIST_FORCE_SENSED_KEY = redis_prefix +
