@@ -7,7 +7,16 @@ It also implements torque saturation, joint position limit and joint velocity li
 
 ## Install
 
-TO BE UPDATED
+1. Follow the Flexiv Robot RDK Download and Install Instructions [here on the Flexiv website](https://www.flexiv.com/software/rdk/manual/index.html)
+
+2. Clone this repo
+
+3. As noted in the Flexiv Install instructions, you'll need to add an additional flag to the cmake command when building the driver in order to access the RDK Install Files. Replace "~/rdk_install" below with the absolute path to your RDK installation folder if necessary: 
+```
+mkdir build && cd build
+cmake .. -DCMAKE_INSTALL_PREFIX=~/rdk_install
+make -j4
+```
 
 ## Usage
 
@@ -33,7 +42,7 @@ or
 
 The config file needs to be in the folder `config_folder`. It is an xml file with one `saiFlexivDriverConfig` tag containing the following attributes:
 
-<saiFrankaDriverConfig robotName="FrankaRobot" robotIP="172.16.0.10" redisPrefix="sai" robotType="fr3"/>
+<saiFlexivDriverConfig robotName="4s-Oberon" serialNumber="Rizon4s_062232" robotType="Rizon4s" redisPrefix="sai"/>
 
 - redisPrefix: the prefix for the redis keys
 - robotName: the name of the robot (for constructing the redis keys)
@@ -63,6 +72,12 @@ The config file needs to be in the folder `config_folder`. It is an xml file wit
 `<prefix>::sensors::<robot_name>::safety_controller::constraint_nullspace`: The nullspace of the safety controller constraint task
 
 `<prefix>::sensors::<robot_name>::safety_controller::sent_torques`: The torques actually sent to the robot. This will be equal to the command torques when no joint position, velocity or torque limit is triggered.
+
+#### Additionally if the robot is the Rizon 4s model, the driver will directly publish the data from the integrated wrist force-torque sensor using the following keys:
+
+`<prefix>::sensors::<robot_name>::ft_sensor::force`: The forces felt by the robot at the wrist in the local force sensor frame.
+
+`<prefix>::sensors::<robot_name>::ft_sensor::force`: The moments felt by the robot at the wrist in the local force sensor frame.
 
 #### The gripper driver additionally reads the following keys:
 
