@@ -280,30 +280,30 @@ void PeriodicTask(flexiv::Robot &robot, flexiv::Gripper &gripper,
 
         redis_client->getCommandIs(GRIPPER_MODE_KEY, gripper_mode);
 
-        // if ((gripper_parameters - last_gripper_parameters).norm() > 0.01) {
-        //     gripper_width = gripper_parameters(0);
-        //     gripper_speed = gripper_parameters(1);
-        //     gripper_force = gripper_parameters(2);
-        //     log.Info(
-        //         "Moving Gripper - Width: " + std::to_string(gripper_width) +
-        //         "m    Speed: " + std::to_string(gripper_speed) +
-        //         "m/s    Force: " + std::to_string(gripper_force) + "N");
-        //     gripper.Move(gripper_width, gripper_speed, gripper_force);
-        //     last_gripper_parameters = gripper_parameters;
-        // }
-
-        if (gripper_mode != last_gripper_mode) {
-            if (gripper_mode == "g") {
-                log.Info("Closing Gripper");
-                gripper.Move(0, 0.1, 60);
-            } else if (gripper_mode == "o") {
-                log.Info("Opening Gripper");
-                gripper.Move(0.05, 0.1, 60);
-            } else {
-                log.Info("Invalid Gripper Command");
-            }
-            last_gripper_mode = gripper_mode;
+        if ((gripper_parameters - last_gripper_parameters).norm() > 0.01) {
+            gripper_width = gripper_parameters(0);
+            gripper_speed = gripper_parameters(1);
+            gripper_force = gripper_parameters(2);
+            log.Info(
+                "Moving Gripper - Width: " + std::to_string(gripper_width) +
+                "m    Speed: " + std::to_string(gripper_speed) +
+                "m/s    Force: " + std::to_string(gripper_force) + "N");
+            gripper.Move(gripper_width, gripper_speed, gripper_force);
+            last_gripper_parameters = gripper_parameters;
         }
+
+        // if (gripper_mode != last_gripper_mode) {
+        //     if (gripper_mode == "g") {
+        //         log.Info("Closing Gripper");
+        //         gripper.Move(0, 0.1, 60);
+        //     } else if (gripper_mode == "o") {
+        //         log.Info("Opening Gripper");
+        //         gripper.Move(0.05, 0.1, 60);
+        //     } else {
+        //         log.Info("Invalid Gripper Command");
+        //     }
+        //     last_gripper_mode = gripper_mode;
+        // }
 
         for (int i = 0; i < 7; ++i) {
             joint_position_max[i] = default_sf * joint_position_max_default[i];
