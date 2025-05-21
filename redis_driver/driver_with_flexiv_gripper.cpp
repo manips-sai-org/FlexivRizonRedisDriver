@@ -1015,7 +1015,7 @@ int main(int argc, char **argv) {
         scheduler.AddTask(std::bind(PeriodicTask, std::ref(robot),
                                     std::ref(gripper), std::ref(model),
                                     std::ref(log), std::ref(redis_client)),
-                          "HP periodic", 1, scheduler.max_priority());
+                          "HP periodic", 1, scheduler.max_priority(), 2);
         // Start all added tasks
         scheduler.Start();
 
