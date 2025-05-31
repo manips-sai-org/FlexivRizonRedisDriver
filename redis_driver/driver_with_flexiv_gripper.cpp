@@ -39,8 +39,10 @@ std::string JOINT_TORQUES_SENSED_KEY;
 std::string MASSMATRIX_KEY;
 std::string CORIOLIS_KEY;
 std::string ROBOT_GRAVITY_KEY;
-std::string WRIST_FORCE_SENSED_KEY;
-std::string WRIST_MOMENT_SENSED_KEY;
+std::string RAW_WRIST_FORCE_SENSED_KEY;
+std::string RAW_WRIST_MOMENT_SENSED_KEY;
+std::string TCP_FORCE_SENSED_KEY;
+std::string TCP_MOMENT_SENSED_KEY;
 std::string SAFETY_TORQUES_LOGGING_KEY;
 std::string SENT_TORQUES_LOGGING_KEY;
 std::string CONSTRAINED_NULLSPACE_KEY;
@@ -97,7 +99,9 @@ std::array<double, 7> tau_cmd_array{};
 std::array<double, 7> q_array{};
 std::array<double, 7> dq_array{};
 std::array<double, 7> tau_sensed_array{};
-std::array<double, 6> wrist_ft_sensed_array{};
+std::array<double, 6> wrist_ft_sensed_raw_array{};
+std::array<double, 6> external_wrench_at_tcp_array{};
+// std::array<double, 6> external_wrench_at_tcp_unfiltered_array{};
 // std::array<double, 7> gravity_vector{};
 // std::array<double, 7> coriolis{};
 // std::array<double, 49> M_array{};
@@ -105,8 +109,10 @@ Eigen::VectorXd gravity_vector{};
 Eigen::VectorXd coriolis{};
 Eigen::MatrixXd M_array{};
 std::vector<std::array<double, 7>> sensor_feedback;
-std::array<double, 3> wrist_ft_sensed_force{};
-std::array<double, 3> wrist_ft_sensed_moment{};
+std::array<double, 3> wrist_ft_sensed_raw_force{};
+std::array<double, 3> wrist_ft_sensed_raw_moment{};
+std::array<double, 3> tcp_sensed_force{};
+std::array<double, 3> tcp_sensed_moment{};
 std::array<double, 1> gripper_current_width{};
 std::array<double, 1> gripper_sensed_grasp_force{};
 std::vector<std::string> key_names;
@@ -356,7 +362,10 @@ void PeriodicTask(flexiv::Robot &robot, flexiv::Gripper &gripper,
         sensor_feedback[1] = robot_state.dq; // non-filtered velocities
         // sensor_feedback[1] = dq_array;  // filtered velocities
         sensor_feedback[2] = robot_state.tau;
-        wrist_ft_sensed_array = robot_state.ft_sensor_raw;
+        wrist_ft_sensed_raw_array = robot_state.ft_sensor_raw;
+        external_wrench_at_tcp_array = robot_state.ext_wrench_in_tcp;
+        // external_wrench_at_tcp_array = robot_state.ext_wrench_in_tcp_raw;
+
         gravity_vector = model.g();
         coriolis = model.c();
         MassMatrix = model.M();
@@ -374,20 +383,26 @@ void PeriodicTask(flexiv::Robot &robot, flexiv::Gripper &gripper,
         redis_client->setGetBatchCommands(key_names, tau_cmd_array, MassMatrix,
                                           sensor_feedback);
         if (driver_config.robot_type == Sai::Flexiv::RobotType::RIZON_4S) {
-            wrist_ft_sensed_force = {wrist_ft_sensed_array[0],
-                                     wrist_ft_sensed_array[1],
-                                     wrist_ft_sensed_array[2]};
-            wrist_ft_sensed_moment = {wrist_ft_sensed_array[3],
-                                      wrist_ft_sensed_array[4],
-                                      wrist_ft_sensed_array[5]};
-            redis_client->setDoubleArray(WRIST_FORCE_SENSED_KEY,
-                                         wrist_ft_sensed_force, 3);
-            redis_client->setDoubleArray(WRIST_MOMENT_SENSED_KEY,
-                                         wrist_ft_sensed_moment, 3);
-            redis_client->setDoubleArray(WRIST_FORCE_SENSED_KEY,
-                                         wrist_ft_sensed_force, 3);
-            redis_client->setDoubleArray(WRIST_MOMENT_SENSED_KEY,
-                                         wrist_ft_sensed_moment, 3);
+            wrist_ft_sensed_raw_force = {wrist_ft_sensed_raw_array[0],
+                                         wrist_ft_sensed_raw_array[1],
+                                         wrist_ft_sensed_raw_array[2]};
+            wrist_ft_sensed_raw_moment = {wrist_ft_sensed_raw_array[3],
+                                          wrist_ft_sensed_raw_array[4],
+                                          wrist_ft_sensed_raw_array[5]};
+            tcp_sensed_force = {external_wrench_at_tcp_array[0],
+                                external_wrench_at_tcp_array[1],
+                                external_wrench_at_tcp_array[2]};
+            tcp_sensed_moment = {external_wrench_at_tcp_array[3],
+                                 external_wrench_at_tcp_array[4],
+                                 external_wrench_at_tcp_array[5]};
+            redis_client->setDoubleArray(RAW_WRIST_FORCE_SENSED_KEY,
+                                         wrist_ft_sensed_raw_force, 3);
+            redis_client->setDoubleArray(RAW_WRIST_MOMENT_SENSED_KEY,
+                                         wrist_ft_sensed_raw_moment, 3);
+            redis_client->setDoubleArray(TCP_FORCE_SENSED_KEY, tcp_sensed_force,
+                                         3);
+            redis_client->setDoubleArray(TCP_MOMENT_SENSED_KEY,
+                                         tcp_sensed_moment, 3);
         }
         redis_client->setEigenMatrixDerived(ROBOT_GRAVITY_KEY, gravity_vector);
         redis_client->setEigenMatrixDerived(CORIOLIS_KEY, coriolis);
@@ -842,12 +857,18 @@ int main(int argc, char **argv) {
                                      "::gripper::grasp_force";
 
     if (driver_config.robot_type == Sai::Flexiv::RobotType::RIZON_4S) {
-        WRIST_FORCE_SENSED_KEY = redis_prefix +
-                                 "sensors::" + driver_config.robot_name +
-                                 "::ft_sensor::force";
-        WRIST_MOMENT_SENSED_KEY = redis_prefix +
-                                  "sensors::" + driver_config.robot_name +
-                                  "::ft_sensor::moment";
+        RAW_WRIST_FORCE_SENSED_KEY = redis_prefix +
+                                     "sensors::" + driver_config.robot_name +
+                                     "::ft_sensor::force_raw";
+        RAW_WRIST_FORCE_SENSED_KEY = redis_prefix +
+                                     "sensors::" + driver_config.robot_name +
+                                     "::ft_sensor::moment_raw";
+        TCP_FORCE_SENSED_KEY = redis_prefix +
+                               "sensors::" + driver_config.robot_name +
+                               "::ft_sensor::tcp_force";
+        TCP_MOMENT_SENSED_KEY = redis_prefix +
+                                "sensors::" + driver_config.robot_name +
+                                "::ft_sensor::tcp_moment";
     }
 
     // start redis client
