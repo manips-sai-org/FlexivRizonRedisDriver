@@ -205,6 +205,12 @@ const std::vector<std::string> limit_state{
 const std::array<double, flexiv::kJointDOF> kFloatingDamping = {
     10.0, 10.0, 5.0, 5.0, 1.0, 1.0, 1.0};
 
+// const std::array<double, flexiv::kJointDOF> kFloatingDamping = {
+//     15.0, 15.0, 7.5, 7.5, 1.5, 1.5, 1.5};
+
+// const std::array<double, flexiv::kJointDOF> kFloatingDamping = {
+//     20.0, 20.0, 10, 10, 2, 2, 2};
+
 /** Atomic signal to stop scheduler tasks */
 std::atomic<bool> g_stop_sched = {false};
 
@@ -860,9 +866,9 @@ int main(int argc, char **argv) {
         RAW_WRIST_FORCE_SENSED_KEY = redis_prefix +
                                      "sensors::" + driver_config.robot_name +
                                      "::ft_sensor::force_raw";
-        RAW_WRIST_FORCE_SENSED_KEY = redis_prefix +
-                                     "sensors::" + driver_config.robot_name +
-                                     "::ft_sensor::moment_raw";
+        RAW_WRIST_MOMENT_SENSED_KEY = redis_prefix +
+                                      "sensors::" + driver_config.robot_name +
+                                      "::ft_sensor::moment_raw";
         TCP_FORCE_SENSED_KEY = redis_prefix +
                                "sensors::" + driver_config.robot_name +
                                "::ft_sensor::tcp_force";
