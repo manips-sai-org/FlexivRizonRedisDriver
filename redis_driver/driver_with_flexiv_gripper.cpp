@@ -14,18 +14,20 @@
 #include "SaiFlexivDriverConfig.h"
 #include "SaiFlexivRedisClientLocal.h"
 
-#include <flexiv/gripper.h>
-#include <flexiv/log.h>
-#include <flexiv/model.h>
-#include <flexiv/robot.h>
-#include <flexiv/scheduler.h>
-#include <flexiv/utility.h>
+#include <flexiv/rdk/gripper.hpp>
+#include <flexiv/rdk/model.hpp>
+#include <flexiv/rdk/robot.hpp>
+#include <flexiv/rdk/scheduler.hpp>
+#include <flexiv/rdk/utility.hpp>
+#include <spdlog/spdlog.h>
 
 #include <atomic>
 #include <cmath>
 #include <iostream>
 #include <string>
 #include <thread>
+
+using namespace flexiv;
 
 // redis keys
 // - read:
@@ -53,6 +55,7 @@ std::string GRIPPER_SENSED_GRASP_FORCE_KEY;
 const bool USING_4S =
     true; // set if using the Rizon 4s with wrist force-torque sensor
 const bool VERBOSE = true; // print out safety violations
+const int K_DOF = 7;
 
 // globals
 std::array<double, 7> joint_position_max_default;
@@ -201,15 +204,33 @@ const std::vector<std::string> limit_state{
     "Safe",         "Soft Min",     "Hard Min",     "Soft Max",    "Hard Max",
     "Min Soft Vel", "Min Hard Vel", "Max Soft Vel", "Max Hard Vel"};
 
+// clang-format off
 /** Joint velocity damping gains for floating */
-const std::array<double, flexiv::kJointDOF> kFloatingDamping = {
-    10.0, 10.0, 5.0, 5.0, 1.0, 1.0, 1.0};
+const std::array<double, K_DOF> kFloatingDamping = {
+    10.0, 10.0, 5.0, 5.0, 1.0,  1.0,  1.0};
+// clang-format on
 
-// const std::array<double, flexiv::kJointDOF> kFloatingDamping = {
+// const std::array<double, K_DOF> kFloatingDamping = {
 //     15.0, 15.0, 7.5, 7.5, 1.5, 1.5, 1.5};
 
-// const std::array<double, flexiv::kJointDOF> kFloatingDamping = {
+// const std::array<double, K_DOF> kFloatingDamping = {
 //     20.0, 20.0, 10, 10, 2, 2, 2};
+
+template <typename T, std::size_t N>
+std::vector<T> arrayToVector(const std::array<T, N> &arr) {
+    return std::vector<T>(arr.begin(), arr.end());
+}
+
+template <typename T, std::size_t N>
+std::array<T, N> vectorToArray(const std::vector<T> &vec) {
+    if (vec.size() != N) {
+        throw std::out_of_range("Vector size does not match array size.");
+    }
+
+    std::array<T, N> arr;
+    std::copy_n(vec.begin(), N, arr.begin());
+    return arr;
+}
 
 /** Atomic signal to stop scheduler tasks */
 std::atomic<bool> g_stop_sched = {false};
@@ -281,8 +302,8 @@ void PrintHelp() {
 }
 
 /** @brief Callback function for realtime periodic task */
-void PeriodicTask(flexiv::Robot &robot, flexiv::Gripper &gripper,
-                  flexiv::Model &model, flexiv::Log &log,
+void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Gripper &gripper,
+                  flexiv::rdk::Model &model,
                   Sai::Flexiv::CDatabaseRedisClient *redis_client) {
 
     try {
@@ -296,7 +317,7 @@ void PeriodicTask(flexiv::Robot &robot, flexiv::Gripper &gripper,
             gripper_width = gripper_parameters(0);
             gripper_speed = gripper_parameters(1);
             gripper_force = gripper_parameters(2);
-            log.Info(
+            spdlog::info(
                 "Moving Gripper - Width: " + std::to_string(gripper_width) +
                 "m    Speed: " + std::to_string(gripper_speed) +
                 "m/s    Force: " + std::to_string(gripper_force) + "N");
@@ -306,13 +327,13 @@ void PeriodicTask(flexiv::Robot &robot, flexiv::Gripper &gripper,
 
         // if (gripper_mode != last_gripper_mode) {
         //     if (gripper_mode == "g") {
-        //         log.Info("Closing Gripper");
+        //         spdlog::info("Closing Gripper");
         //         gripper.Move(0, 0.1, 60);
         //     } else if (gripper_mode == "o") {
-        //         log.Info("Opening Gripper");
+        //         spdlog::info("Opening Gripper");
         //         gripper.Move(0.05, 0.1, 60);
         //     } else {
-        //         log.Info("Invalid Gripper Command");
+        //         spdlog::info("Invalid Gripper Command");
         //     }
         //     last_gripper_mode = gripper_mode;
         // }
@@ -364,14 +385,14 @@ void PeriodicTask(flexiv::Robot &robot, flexiv::Gripper &gripper,
         auto gripper_state = gripper.states();
 
         // start = std::clock();
-        sensor_feedback[0] = robot_state.q;
-        sensor_feedback[1] = robot_state.dq; // non-filtered velocities
+        sensor_feedback[0] = vectorToArray<double, K_DOF>(robot_state.q);
+        sensor_feedback[1] = vectorToArray<double, K_DOF>(
+            robot_state.dq); // non-filtered velocities
         // sensor_feedback[1] = dq_array;  // filtered velocities
-        sensor_feedback[2] = robot_state.tau;
+        sensor_feedback[2] = vectorToArray<double, K_DOF>(robot_state.tau);
         wrist_ft_sensed_raw_array = robot_state.ft_sensor_raw;
         external_wrench_at_tcp_array = robot_state.ext_wrench_in_tcp;
         // external_wrench_at_tcp_array = robot_state.ext_wrench_in_tcp_raw;
-
         gravity_vector = model.g();
         coriolis = model.c();
         MassMatrix = model.M();
@@ -412,10 +433,11 @@ void PeriodicTask(flexiv::Robot &robot, flexiv::Gripper &gripper,
         }
         redis_client->setEigenMatrixDerived(ROBOT_GRAVITY_KEY, gravity_vector);
         redis_client->setEigenMatrixDerived(CORIOLIS_KEY, coriolis);
-        redis_client->setDoubleArray(GRIPPER_CURRENT_WIDTH_KEY,
-                                     gripper_current_width, 1);
-        redis_client->setDoubleArray(GRIPPER_SENSED_GRASP_FORCE_KEY,
-                                     gripper_sensed_grasp_force, 1);
+        redis_client->setCommandIs(GRIPPER_CURRENT_WIDTH_KEY,
+                                   std::to_string(gripper_current_width[0]));
+        redis_client->setCommandIs(
+            GRIPPER_SENSED_GRASP_FORCE_KEY,
+            std::to_string(gripper_sensed_grasp_force[0]));
 
         // reset containers
         _limited_joints.setZero(); // used to form the constraint jacobian
@@ -746,10 +768,10 @@ void PeriodicTask(flexiv::Robot &robot, flexiv::Gripper &gripper,
         }
 
         // Set joint torques to command torques from Redis
-        std::array<double, flexiv::kJointDOF> target_torque = tau_cmd_array;
+        std::array<double, K_DOF> target_torque = tau_cmd_array;
 
         // Set 0 joint toruqes
-        // std::array<double, flexiv::kJointDOF> target_torque = {};
+        // std::array<double, K_DOF> target_torque = {};
 
         // Initialization at the start
         if (!initialized_torque_bias) {
@@ -781,20 +803,20 @@ void PeriodicTask(flexiv::Robot &robot, flexiv::Gripper &gripper,
         }
 
         // Add some velocity damping
-        for (size_t i = 0; i < flexiv::kJointDOF; ++i) {
+        for (size_t i = 0; i < K_DOF; ++i) {
             target_torque[i] += -kFloatingDamping[i] * robot.states().dtheta[i];
             // std::cout << target_torque[i] << "\n";
         }
 
         // Send target joint torque to RDK server, enable gravity compensation
         // and joint limits soft protection
-        robot.StreamJointTorque(target_torque, true, true);
+        robot.StreamJointTorque(arrayToVector(target_torque), true, true);
 
         counter++;
     } catch (const std::exception &e) {
         std::cout << "Error \n"
                   << "\n";
-        log.Error(e.what());
+        spdlog::error(e.what());
         g_stop_sched = true;
     }
 }
@@ -804,11 +826,11 @@ int main(int argc, char **argv) {
     // Program Setup
     // =============================================================================================
     // Logger for printing message with timestamp and coloring
-    flexiv::Log log;
+    // flexiv::Log log;
 
     // Parse parameters
-    if (argc < 2 ||
-        flexiv::utility::ProgramArgsExistAny(argc, argv, {"-h", "--help"})) {
+    if (argc < 2 || flexiv::rdk::utility::ProgramArgsExistAny(
+                        argc, argv, {"-h", "--help"})) {
         PrintHelp();
         return 1;
     }
@@ -966,43 +988,43 @@ int main(int argc, char **argv) {
         // RDK Initialization
         // =========================================================================================
         // Instantiate robot interface
-        flexiv::Robot robot(driver_config.serial_number);
+        flexiv::rdk::Robot robot(driver_config.serial_number);
         // load the kinematics and dynamics model
-        flexiv::Model model(robot);
+        flexiv::rdk::Model model(robot);
 
         // Clear fault on the connected robot if any
         if (robot.fault()) {
-            log.Warn(
+            spdlog::warn(
                 "Fault occurred on the connected robot, trying to clear ...");
             // Try to clear the fault
             if (!robot.ClearFault()) {
-                log.Error("Fault cannot be cleared, exiting ...");
+                spdlog::error("Fault cannot be cleared, exiting ...");
                 return 1;
             }
-            log.Info("Fault on the connected robot is cleared");
+            spdlog::info("Fault on the connected robot is cleared");
         }
 
         // Enable the robot, make sure the E-stop is released before enabling
-        log.Info("Enabling robot ...");
+        spdlog::info("Enabling robot ...");
         robot.Enable();
 
         // Wait for the robot to become operational
         while (!robot.operational()) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
-        log.Info("Robot is now operational");
+        spdlog::info("Robot is now operational");
 
         // Zero Force-torque Sensors
         // =========================================================================================
         // IMPORTANT: must zero force/torque sensor offset for accurate
         // force/torque measurement
-        robot.SwitchMode(flexiv::Mode::NRT_PRIMITIVE_EXECUTION);
+        robot.SwitchMode(flexiv::rdk::Mode::NRT_PRIMITIVE_EXECUTION);
         robot.ExecutePrimitive("ZeroFTSensor()");
 
         // WARNING: during the process, the robot must not contact anything,
         // otherwise the result will be inaccurate and affect following
         // operations
-        log.Info(
+        spdlog::info(
             "Zeroing force/torque sensors, make sure nothing is in contact "
             "with the robot");
 
@@ -1010,7 +1032,7 @@ int main(int argc, char **argv) {
         while (robot.busy()) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
-        log.Info("Sensor zeroing complete");
+        spdlog::info("Sensor zeroing complete");
 
         // Wait for the primitive to finish
         while (robot.busy()) {
@@ -1018,13 +1040,13 @@ int main(int argc, char **argv) {
         }
 
         // Instantiate gripper control interface
-        flexiv::Gripper gripper(robot);
+        flexiv::rdk::Gripper gripper(robot);
 
         // Manually initialize the gripper, not all grippers need this step
-        log.Info(
+        spdlog::info(
             "Initializing gripper, this process takes about 10 seconds ...");
         gripper.Init();
-        log.Info("Initialization complete");
+        spdlog::info("Initialization complete");
 
         // Wait for the primitive to finish
         while (robot.busy()) {
@@ -1034,15 +1056,15 @@ int main(int argc, char **argv) {
         // Real-time Control
         // =========================================================================================
         // Switch to real-time joint torque control mode
-        robot.SwitchMode(flexiv::Mode::RT_JOINT_TORQUE);
+        robot.SwitchMode(flexiv::rdk::Mode::RT_JOINT_TORQUE);
 
         // Create real-time scheduler to run periodic tasks
-        flexiv::Scheduler scheduler;
+        flexiv::rdk::Scheduler scheduler;
         // Add periodic task with 1ms interval and highest applicable priority
         scheduler.AddTask(std::bind(PeriodicTask, std::ref(robot),
                                     std::ref(gripper), std::ref(model),
-                                    std::ref(log), std::ref(redis_client)),
-                          "HP periodic", 1, scheduler.max_priority(), 2);
+                                    std::ref(redis_client)),
+                          "HP periodic", 1, scheduler.max_priority());
         // Start all added tasks
         scheduler.Start();
 
@@ -1054,7 +1076,7 @@ int main(int argc, char **argv) {
         scheduler.Stop();
 
     } catch (const std::exception &e) {
-        log.Error(e.what());
+        spdlog::error(e.what());
         return 1;
     }
 
