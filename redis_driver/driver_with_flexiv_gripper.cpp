@@ -313,7 +313,7 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Gripper &gripper,
 
         redis_client->getCommandIs(GRIPPER_MODE_KEY, gripper_mode);
 
-        if ((gripper_parameters - last_gripper_parameters).norm() > 0.01) {
+        if ((gripper_parameters - last_gripper_parameters).norm() > 0.001) {
             gripper_width = gripper_parameters(0);
             gripper_speed = gripper_parameters(1);
             gripper_force = gripper_parameters(2);
@@ -1014,11 +1014,13 @@ int main(int argc, char **argv) {
         }
         spdlog::info("Robot is now operational");
 
+        // Switch Mode to Primitive Execution
+        robot.SwitchMode(flexiv::rdk::Mode::NRT_PRIMITIVE_EXECUTION);
+
         // Zero Force-torque Sensors
         // =========================================================================================
         // IMPORTANT: must zero force/torque sensor offset for accurate
         // force/torque measurement
-        robot.SwitchMode(flexiv::rdk::Mode::NRT_PRIMITIVE_EXECUTION);
         robot.ExecutePrimitive("ZeroFTSensor()");
 
         // WARNING: during the process, the robot must not contact anything,
@@ -1036,7 +1038,7 @@ int main(int argc, char **argv) {
 
         // Wait for the primitive to finish
         while (robot.busy()) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            std::this_thread::sleep_for(std::chrono::seconds(5));
         }
 
         // Instantiate gripper control interface
@@ -1046,12 +1048,9 @@ int main(int argc, char **argv) {
         spdlog::info(
             "Initializing gripper, this process takes about 10 seconds ...");
         gripper.Init();
+        // Manual wait for gripper initialization to finish
+        std::this_thread::sleep_for(std::chrono::seconds(12));
         spdlog::info("Initialization complete");
-
-        // Wait for the primitive to finish
-        while (robot.busy()) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-        }
 
         // Real-time Control
         // =========================================================================================
