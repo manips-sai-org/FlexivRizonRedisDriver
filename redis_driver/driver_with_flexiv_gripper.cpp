@@ -56,7 +56,7 @@ const bool USING_4S =
     true; // set if using the Rizon 4s with wrist force-torque sensor
 const bool VERBOSE = true; // print out safety violations
 const int K_DOF = 7;
-const double FREE_DRIVE_THRESHOLD = 2; // n-m norm
+const double FREE_DRIVE_THRESHOLD = 3; // n-m norm
 int not_touching_counter = 0;
 const int NOT_TOUCHING_WINDOW = 400; // ms
 
@@ -1045,7 +1045,11 @@ int main(int argc, char **argv) {
         // RDK Initialization
         // =========================================================================================
         // Instantiate robot interface
-        flexiv::rdk::Robot robot(driver_config.serial_number);
+        // flexiv::rdk::Robot robot(driver_config.serial_number,
+        //                          {"192.168.100.11"});
+        flexiv::rdk::Robot robot(driver_config.serial_number,
+                                 {driver_config.computer_ip_address});
+        // flexiv::rdk::Robot robot(driver_config.serial_number);
         // load the kinematics and dynamics model
         flexiv::rdk::Model model(robot);
 
@@ -1122,7 +1126,8 @@ int main(int argc, char **argv) {
         scheduler.AddTask(std::bind(PeriodicTask, std::ref(robot),
                                     std::ref(gripper), std::ref(model),
                                     std::ref(redis_client)),
-                          "HP periodic", 1, scheduler.max_priority(), 2);
+                          "HP periodic", 1, driver_config.process_priority,
+                          driver_config.cpu_affinity);
         // Start all added tasks
         scheduler.Start();
 

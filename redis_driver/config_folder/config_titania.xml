@@ -1,3 +1,9 @@
 <?xml version="1.0" ?>
 
-<saiFlexivDriverConfig robotName="4s-Titania" serialNumber="Rizon4s_062659" robotType="Rizon4s" redisPrefix="sai"/>
+<saiFlexivDriverConfig robotName="4s-Titania" 
+                       serialNumber="Rizon4s_062659" 
+                       robotType="Rizon4s" 
+                       computerIpAddress="172.16.0.20" 
+                       redisPrefix="sai" 
+                       cpuAffinity="3" 
+                       processPriority="90"/>

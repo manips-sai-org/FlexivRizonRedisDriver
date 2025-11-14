@@ -15,8 +15,11 @@ struct DriverConfig {
     std::string robot_name;
     std::string serial_number;
     RobotType robot_type;
+    std::string computer_ip_address;
     std::string force_sensor_link_name = "flange";
     std::string redis_prefix = "sai";
+    int process_priority = 50;
+    int cpu_affinity = -1;
     bool verbose = true;
 };
 
@@ -74,6 +77,27 @@ DriverConfig loadConfig(const std::string &config_file) {
     } else {
         throw runtime_error("Unknown robot type: " + robot_type_str +
                             "\nsupported types are: Rizon4, Rizon4s");
+    }
+
+    // computer ip address for ip whitelisting
+    if (!driver_xml->Attribute("computerIpAddress")) {
+        throw runtime_error(
+            "No 'computerIpAddress' attribute found in driver config file: " +
+            config_file);
+    }
+    config.computer_ip_address = driver_xml->Attribute("computerIpAddress");
+
+    // CPU Core Affinity
+    if (driver_xml->Attribute("cpuAffinity")) {
+        std::string cpu_affinity_str = driver_xml->Attribute("cpuAffinity");
+        config.cpu_affinity = std::stoi(cpu_affinity_str);
+    }
+
+    // Process Priority
+    if (driver_xml->Attribute("processPriority")) {
+        std::string process_priority_str =
+            driver_xml->Attribute("processPriority");
+        config.process_priority = std::stoi(process_priority_str);
     }
 
     // force sensor link name
