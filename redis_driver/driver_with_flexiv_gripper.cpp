@@ -56,6 +56,9 @@ const bool USING_4S =
     true; // set if using the Rizon 4s with wrist force-torque sensor
 const bool VERBOSE = true; // print out safety violations
 const int K_DOF = 7;
+const double FREE_DRIVE_THRESHOLD = 2; // n-m norm
+int not_touching_counter = 0;
+const int NOT_TOUCHING_WINDOW = 400; // ms
 
 // globals
 std::array<double, 7> joint_position_max_default;
@@ -178,6 +181,8 @@ int n_curr = 0;
 bool initialized_torque_bias = false;
 std::vector<double> kp_holding = {1000, 1000, 1000, 1000, 1000, 1000, 1000};
 std::vector<double> kv_holding = {10, 10, 10, 10, 10, 10, 10};
+std::vector<double> kp_holding_drive = {50, 50, 50, 50, 50, 50, 50};
+std::vector<double> kv_holding_drive = {2, 2, 2, 2, 2, 2, 2};
 Eigen::VectorXd q_init = Eigen::VectorXd::Zero(7);
 bool first_loop = true;
 
@@ -770,6 +775,13 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Gripper &gripper,
         // Set joint torques to command torques from Redis
         std::array<double, K_DOF> target_torque = tau_cmd_array;
 
+        bool active_command = false;
+        for (int i = 0; i < 7; ++i) {
+            if (target_torque[i] != 0) {
+                active_command = true;
+            }
+        }
+
         // Set 0 joint toruqes
         // std::array<double, K_DOF> target_torque = {};
 
@@ -796,6 +808,50 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Gripper &gripper,
             }
             n_curr++;
 
+        } else if (!active_command) {
+
+            if ((_sensed_torques - gravity_vector).norm() >
+                FREE_DRIVE_THRESHOLD) {
+
+                not_touching_counter = 0;
+                // active drive
+                for (int i = 0; i < 7; ++i) {
+                    q_init(i) = robot_state.q[i];
+                    // target_torque[i] += init_torque_bias(i);
+                }
+            } else {
+
+                not_touching_counter++;
+
+                if (not_touching_counter > NOT_TOUCHING_WINDOW) {
+                    // position hold if not touching
+                    for (int i = 0; i < 7; ++i) {
+                        target_torque[i] =
+                            -kp_holding_drive[i] *
+                                (robot_state.q[i] - q_init(i)) -
+                            kv_holding_drive[i] * robot_state.dq[i];
+                    }
+                } else {
+                    for (int i = 0; i < 7; ++i) {
+                        q_init(i) = robot_state.q[i];
+                        // target_torque[i] += init_torque_bias(i);
+                        target_torque[i] =
+                            -kv_holding_drive[i] * robot_state.dq[i];
+                    }
+                }
+            }
+
+            // // multiply by mass matrix
+            // Eigen::VectorXd holding_torques = Eigen::VectorXd::Zero(7);
+            // for (int i = 0; i < 7; ++i) {
+            //     holding_torques(i) = target_torque[i];
+            // }
+            // Eigen::VectorXd decoupled_holding_torques =
+            //     MassMatrix * holding_torques;
+            // for (int i = 0; i < 7; ++i) {
+            //     target_torque[i] = decoupled_holding_torques(i);
+            // }
+
         } else {
             for (int i = 0; i < 7; ++i) {
                 target_torque[i] += init_torque_bias(i);
@@ -808,8 +864,8 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Gripper &gripper,
             // std::cout << target_torque[i] << "\n";
         }
 
-        // Send target joint torque to RDK server, enable gravity compensation
-        // and joint limits soft protection
+        // Send target joint torque to RDK server, enable gravity
+        // compensation and joint limits soft protection
         robot.StreamJointTorque(arrayToVector(target_torque), true, true);
 
         counter++;
@@ -913,7 +969,8 @@ int main(int argc, char **argv) {
     }
 
     redis_client->setDoubleArray(JOINT_TORQUES_COMMANDED_KEY, tau_cmd_array, 7);
-    // safety to detect if controller is already running : wait 50 milliseconds
+    // safety to detect if controller is already running : wait 50
+    // milliseconds
     usleep(50000);
     redis_client->getDoubleArray(JOINT_TORQUES_COMMANDED_KEY, tau_cmd_array, 7);
     for (int i = 0; i < 7; ++i) {
@@ -994,8 +1051,8 @@ int main(int argc, char **argv) {
 
         // Clear fault on the connected robot if any
         if (robot.fault()) {
-            spdlog::warn(
-                "Fault occurred on the connected robot, trying to clear ...");
+            spdlog::warn("Fault occurred on the connected robot, trying to "
+                         "clear ...");
             // Try to clear the fault
             if (!robot.ClearFault()) {
                 spdlog::error("Fault cannot be cleared, exiting ...");
@@ -1004,7 +1061,8 @@ int main(int argc, char **argv) {
             spdlog::info("Fault on the connected robot is cleared");
         }
 
-        // Enable the robot, make sure the E-stop is released before enabling
+        // Enable the robot, make sure the E-stop is released before
+        // enabling
         spdlog::info("Enabling robot ...");
         robot.Enable();
 
@@ -1045,8 +1103,8 @@ int main(int argc, char **argv) {
         flexiv::rdk::Gripper gripper(robot);
 
         // Manually initialize the gripper, not all grippers need this step
-        spdlog::info(
-            "Initializing gripper, this process takes about 10 seconds ...");
+        spdlog::info("Initializing gripper, this process takes about 10 "
+                     "seconds ...");
         gripper.Init();
         // Manual wait for gripper initialization to finish
         std::this_thread::sleep_for(std::chrono::seconds(12));
@@ -1059,11 +1117,12 @@ int main(int argc, char **argv) {
 
         // Create real-time scheduler to run periodic tasks
         flexiv::rdk::Scheduler scheduler;
-        // Add periodic task with 1ms interval and highest applicable priority
+        // Add periodic task with 1ms interval and highest applicable
+        // priority
         scheduler.AddTask(std::bind(PeriodicTask, std::ref(robot),
                                     std::ref(gripper), std::ref(model),
                                     std::ref(redis_client)),
-                          "HP periodic", 1, scheduler.max_priority());
+                          "HP periodic", 1, scheduler.max_priority(), 2);
         // Start all added tasks
         scheduler.Start();
 
