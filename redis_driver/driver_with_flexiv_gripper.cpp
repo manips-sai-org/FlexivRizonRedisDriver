@@ -56,7 +56,7 @@ const bool USING_4S =
     true; // set if using the Rizon 4s with wrist force-torque sensor
 const bool VERBOSE = true; // print out safety violations
 const int K_DOF = 7;
-const double FREE_DRIVE_THRESHOLD = 3; // n-m norm
+const double FREE_DRIVE_THRESHOLD = 4; // n-m norm
 int not_touching_counter = 0;
 const int NOT_TOUCHING_WINDOW = 400; // ms
 
@@ -181,8 +181,8 @@ int n_curr = 0;
 bool initialized_torque_bias = false;
 std::vector<double> kp_holding = {1000, 1000, 1000, 1000, 1000, 1000, 1000};
 std::vector<double> kv_holding = {10, 10, 10, 10, 10, 10, 10};
-std::vector<double> kp_holding_drive = {50, 50, 50, 50, 50, 50, 50};
-std::vector<double> kv_holding_drive = {2, 2, 2, 2, 2, 2, 2};
+std::vector<double> kp_holding_drive = {100, 100, 100, 100, 100, 100, 100};
+std::vector<double> kv_holding_drive = {10, 10, 10, 10, 10, 10, 10};
 Eigen::VectorXd q_init = Eigen::VectorXd::Zero(7);
 bool first_loop = true;
 
@@ -841,16 +841,16 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Gripper &gripper,
                 }
             }
 
-            // // multiply by mass matrix
-            // Eigen::VectorXd holding_torques = Eigen::VectorXd::Zero(7);
-            // for (int i = 0; i < 7; ++i) {
-            //     holding_torques(i) = target_torque[i];
-            // }
-            // Eigen::VectorXd decoupled_holding_torques =
-            //     MassMatrix * holding_torques;
-            // for (int i = 0; i < 7; ++i) {
-            //     target_torque[i] = decoupled_holding_torques(i);
-            // }
+            // multiply by mass matrix
+            Eigen::VectorXd holding_torques = Eigen::VectorXd::Zero(7);
+            for (int i = 0; i < 7; ++i) {
+                holding_torques(i) = target_torque[i];
+            }
+            Eigen::VectorXd decoupled_holding_torques =
+                MassMatrix * holding_torques;
+            for (int i = 0; i < 7; ++i) {
+                target_torque[i] = decoupled_holding_torques(i);
+            }
 
         } else {
             for (int i = 0; i < 7; ++i) {
