@@ -1083,7 +1083,8 @@ int main(int argc, char **argv) {
         // =========================================================================================
         // IMPORTANT: must zero force/torque sensor offset for accurate
         // force/torque measurement
-        robot.ExecutePrimitive("ZeroFTSensor()");
+        robot.ExecutePrimitive("ZeroFTSensor",
+                               std::map<std::string, rdk::FlexivDataTypes>{});
 
         // WARNING: during the process, the robot must not contact anything,
         // otherwise the result will be inaccurate and affect following
