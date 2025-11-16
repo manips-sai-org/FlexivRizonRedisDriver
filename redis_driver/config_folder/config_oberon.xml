@@ -5,5 +5,5 @@
                        robotType="Rizon4s" 
                        computerIpAddress="192.168.100.11" 
                        redisPrefix="sai" 
-                       cpuAffinity="2"
+                       cpuAffinity="4"
                        processPriority="93"/>
