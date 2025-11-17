@@ -50,13 +50,14 @@ std::string SENT_TORQUES_LOGGING_KEY;
 std::string CONSTRAINED_NULLSPACE_KEY;
 std::string GRIPPER_CURRENT_WIDTH_KEY;
 std::string GRIPPER_SENSED_GRASP_FORCE_KEY;
+std::string SAI_DEBUG_KEY;
 
 // user options
 const bool USING_4S =
     true; // set if using the Rizon 4s with wrist force-torque sensor
 const bool VERBOSE = true; // print out safety violations
 const int K_DOF = 7;
-const double FREE_DRIVE_THRESHOLD = 4; // n-m norm
+const double FREE_DRIVE_THRESHOLD = 6; // n-m norm
 int not_touching_counter = 0;
 const int NOT_TOUCHING_WINDOW = 400; // ms
 
@@ -102,6 +103,7 @@ enum Limit {
 // data
 Eigen::MatrixXd MassMatrix;
 std::array<double, 7> tau_cmd_array{};
+std::array<double, 7> redis_command_storage_array{};
 std::array<double, 7> q_array{};
 std::array<double, 7> dq_array{};
 std::array<double, 7> tau_sensed_array{};
@@ -181,7 +183,7 @@ int n_curr = 0;
 bool initialized_torque_bias = false;
 std::vector<double> kp_holding = {1000, 1000, 1000, 1000, 1000, 1000, 1000};
 std::vector<double> kv_holding = {10, 10, 10, 10, 10, 10, 10};
-std::vector<double> kp_holding_drive = {100, 100, 100, 100, 100, 100, 100};
+std::vector<double> kp_holding_drive = {200, 200, 200, 200, 200, 200, 200};
 std::vector<double> kv_holding_drive = {10, 10, 10, 10, 10, 10, 10};
 Eigen::VectorXd q_init = Eigen::VectorXd::Zero(7);
 bool first_loop = true;
@@ -414,6 +416,7 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Gripper &gripper,
 
         redis_client->setGetBatchCommands(key_names, tau_cmd_array, MassMatrix,
                                           sensor_feedback);
+        redis_command_storage_array = tau_cmd_array;
         if (driver_config.robot_type == Sai::Flexiv::RobotType::RIZON_4S) {
             wrist_ft_sensed_raw_force = {wrist_ft_sensed_raw_array[0],
                                          wrist_ft_sensed_raw_array[1],
@@ -777,7 +780,7 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Gripper &gripper,
 
         bool active_command = false;
         for (int i = 0; i < 7; ++i) {
-            if (target_torque[i] != 0) {
+            if (redis_command_storage_array[i] != 0) {
                 active_command = true;
             }
         }
@@ -812,8 +815,10 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Gripper &gripper,
 
             if ((_sensed_torques - gravity_vector).norm() >
                 FREE_DRIVE_THRESHOLD) {
-
                 not_touching_counter = 0;
+
+                redis_client->setCommandIs(
+                    SAI_DEBUG_KEY, "From Driver - Robot Touch Detected - Floating");
                 // active drive
                 for (int i = 0; i < 7; ++i) {
                     q_init(i) = robot_state.q[i];
@@ -825,6 +830,9 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Gripper &gripper,
 
                 if (not_touching_counter > NOT_TOUCHING_WINDOW) {
                     // position hold if not touching
+                    redis_client->setCommandIs(
+                        SAI_DEBUG_KEY,
+                        "From Driver - No Touch Detected, Holding");
                     for (int i = 0; i < 7; ++i) {
                         target_torque[i] =
                             -kp_holding_drive[i] *
@@ -954,6 +962,7 @@ int main(int argc, char **argv) {
                                 "sensors::" + driver_config.robot_name +
                                 "::ft_sensor::tcp_moment";
     }
+    SAI_DEBUG_KEY = redis_prefix + "debug";
 
     // start redis client
     Sai::Flexiv::CDatabaseRedisClient *redis_client;
