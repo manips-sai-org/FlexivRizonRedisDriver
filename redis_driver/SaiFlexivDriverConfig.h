@@ -15,6 +15,7 @@ struct DriverConfig {
     std::string robot_name;
     std::string serial_number;
     RobotType robot_type;
+    std::string gripper_name;
     std::string computer_ip_address;
     std::string force_sensor_link_name = "flange";
     std::string redis_prefix = "sai";
@@ -77,6 +78,11 @@ DriverConfig loadConfig(const std::string &config_file) {
     } else {
         throw runtime_error("Unknown robot type: " + robot_type_str +
                             "\nsupported types are: Rizon4, Rizon4s");
+    }
+
+    // gripper_name
+    if (driver_xml->Attribute("gripperName")) {
+        config.gripper_name = driver_xml->Attribute("gripperName");
     }
 
     // computer ip address for ip whitelisting

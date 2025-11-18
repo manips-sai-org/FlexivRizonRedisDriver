@@ -11,7 +11,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(CMAKE_PREFIX_PATH="~/rdk_install_flexiv")
 # Create a library
-# add_executable(${PROJECT_NAME} driver_robot_only.cpp)
+add_executable(${PROJECT_NAME}_robot_only driver_robot_only.cpp)
 add_executable(${PROJECT_NAME}_with_gripper driver_with_flexiv_gripper.cpp)
 
 # Find flexiv_rdk INTERFACE library
@@ -52,7 +52,7 @@ set(flexiv_rizon4_redis_driver_LIBRARIES
 )
 
 include_directories( ${flexiv_rizon4_redis_driver_INCLUDE_DIRS} )
-# target_link_libraries(${PROJECT_NAME} ${flexiv_rizon4_redis_driver_LIBRARIES})
+target_link_libraries(${PROJECT_NAME}_robot_only ${flexiv_rizon4_redis_driver_LIBRARIES})
 target_link_libraries(${PROJECT_NAME}_with_gripper ${flexiv_rizon4_redis_driver_LIBRARIES})
 
 set(CONFIG_FOLDER "${CMAKE_CURRENT_SOURCE_DIR}/config_folder")

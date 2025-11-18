@@ -14,11 +14,12 @@
 #include "SaiFlexivDriverConfig.h"
 #include "SaiFlexivRedisClientLocal.h"
 
-#include <flexiv/log.h>
-#include <flexiv/model.h>
-#include <flexiv/robot.h>
-#include <flexiv/scheduler.h>
-#include <flexiv/utility.h>
+#include <flexiv/rdk/gripper.hpp>
+#include <flexiv/rdk/model.hpp>
+#include <flexiv/rdk/robot.hpp>
+#include <flexiv/rdk/scheduler.hpp>
+#include <flexiv/rdk/utility.hpp>
+#include <spdlog/spdlog.h>
 
 #include <atomic>
 #include <cmath>
@@ -26,9 +27,13 @@
 #include <string>
 #include <thread>
 
+using namespace flexiv;
+
 // redis keys
 // - read:
 std::string JOINT_TORQUES_COMMANDED_KEY;
+std::string GRIPPER_PARAMETERS_COMMANDED_KEY;
+std::string GRIPPER_MODE_KEY;
 // - write:
 std::string JOINT_ANGLES_KEY;
 std::string JOINT_VELOCITIES_KEY;
@@ -45,6 +50,16 @@ std::string SENT_TORQUES_LOGGING_KEY;
 std::string CONSTRAINED_NULLSPACE_KEY;
 std::string GRIPPER_CURRENT_WIDTH_KEY;
 std::string GRIPPER_SENSED_GRASP_FORCE_KEY;
+std::string SAI_DEBUG_KEY;
+
+// user options
+const bool USING_4S =
+    true; // set if using the Rizon 4s with wrist force-torque sensor
+const bool VERBOSE = true; // print out safety violations
+const int K_DOF = 7;
+const double FREE_DRIVE_THRESHOLD = 6; // n-m norm
+int not_touching_counter = 0;
+const int NOT_TOUCHING_WINDOW = 400; // ms
 
 // globals
 std::array<double, 7> joint_position_max_default;
@@ -88,6 +103,7 @@ enum Limit {
 // data
 Eigen::MatrixXd MassMatrix;
 std::array<double, 7> tau_cmd_array{};
+std::array<double, 7> redis_command_storage_array{};
 std::array<double, 7> q_array{};
 std::array<double, 7> dq_array{};
 std::array<double, 7> tau_sensed_array{};
@@ -111,6 +127,16 @@ std::vector<std::string> key_names;
 // bool fDriverRunning = true;
 // void sighandler(int sig)
 // { fDriverRunning = false; }
+
+// gripper command storage
+Eigen::Vector3d gripper_parameters =
+    Eigen::Vector3d(0.06, 0.1, 10.0); // width in m, speed in m/s, force in N
+Eigen::Vector3d last_gripper_parameters = gripper_parameters;
+std::string gripper_mode = "o";
+std::string last_gripper_mode = gripper_mode;
+double gripper_width;
+double gripper_speed;
+double gripper_force;
 
 // limit options
 bool _pos_limit_opt = true;
@@ -157,6 +183,8 @@ int n_curr = 0;
 bool initialized_torque_bias = false;
 std::vector<double> kp_holding = {1000, 1000, 1000, 1000, 1000, 1000, 1000};
 std::vector<double> kv_holding = {10, 10, 10, 10, 10, 10, 10};
+std::vector<double> kp_holding_drive = {200, 200, 200, 200, 200, 200, 200};
+std::vector<double> kv_holding_drive = {10, 10, 10, 10, 10, 10, 10};
 Eigen::VectorXd q_init = Eigen::VectorXd::Zero(7);
 bool first_loop = true;
 
@@ -183,9 +211,33 @@ const std::vector<std::string> limit_state{
     "Safe",         "Soft Min",     "Hard Min",     "Soft Max",    "Hard Max",
     "Min Soft Vel", "Min Hard Vel", "Max Soft Vel", "Max Hard Vel"};
 
+// clang-format off
 /** Joint velocity damping gains for floating */
-const std::array<double, flexiv::kJointDOF> kFloatingDamping = {
-    10.0, 10.0, 5.0, 5.0, 1.0, 1.0, 1.0};
+const std::array<double, K_DOF> kFloatingDamping = {
+    10.0, 10.0, 5.0, 5.0, 1.0,  1.0,  1.0};
+// clang-format on
+
+// const std::array<double, K_DOF> kFloatingDamping = {
+//     15.0, 15.0, 7.5, 7.5, 1.5, 1.5, 1.5};
+
+// const std::array<double, K_DOF> kFloatingDamping = {
+//     20.0, 20.0, 10, 10, 2, 2, 2};
+
+template <typename T, std::size_t N>
+std::vector<T> arrayToVector(const std::array<T, N> &arr) {
+    return std::vector<T>(arr.begin(), arr.end());
+}
+
+template <typename T, std::size_t N>
+std::array<T, N> vectorToArray(const std::vector<T> &vec) {
+    if (vec.size() != N) {
+        throw std::out_of_range("Vector size does not match array size.");
+    }
+
+    std::array<T, N> arr;
+    std::copy_n(vec.begin(), N, arr.begin());
+    return arr;
+}
 
 /** Atomic signal to stop scheduler tasks */
 std::atomic<bool> g_stop_sched = {false};
@@ -257,10 +309,41 @@ void PrintHelp() {
 }
 
 /** @brief Callback function for realtime periodic task */
-void PeriodicTask(flexiv::Robot &robot, flexiv::Model &model, flexiv::Log &log,
+void PeriodicTask(flexiv::rdk::Robot &robot,
+                  flexiv::rdk::Model &model,
                   Sai::Flexiv::CDatabaseRedisClient *redis_client) {
 
     try {
+
+        redis_client->getEigenMatrixDerivedString(
+            GRIPPER_PARAMETERS_COMMANDED_KEY, gripper_parameters);
+
+        redis_client->getCommandIs(GRIPPER_MODE_KEY, gripper_mode);
+
+        // if ((gripper_parameters - last_gripper_parameters).norm() > 0.001) {
+        //     gripper_width = gripper_parameters(0);
+        //     gripper_speed = gripper_parameters(1);
+        //     gripper_force = gripper_parameters(2);
+        //     spdlog::info(
+        //         "Moving Gripper - Width: " + std::to_string(gripper_width) +
+        //         "m    Speed: " + std::to_string(gripper_speed) +
+        //         "m/s    Force: " + std::to_string(gripper_force) + "N");
+        //     gripper.Move(gripper_width, gripper_speed, gripper_force);
+        //     last_gripper_parameters = gripper_parameters;
+        // }
+
+        // if (gripper_mode != last_gripper_mode) {
+        //     if (gripper_mode == "g") {
+        //         spdlog::info("Closing Gripper");
+        //         gripper.Move(0, 0.1, 60);
+        //     } else if (gripper_mode == "o") {
+        //         spdlog::info("Opening Gripper");
+        //         gripper.Move(0.05, 0.1, 60);
+        //     } else {
+        //         spdlog::info("Invalid Gripper Command");
+        //     }
+        //     last_gripper_mode = gripper_mode;
+        // }
 
         for (int i = 0; i < 7; ++i) {
             joint_position_max[i] = default_sf * joint_position_max_default[i];
@@ -306,19 +389,22 @@ void PeriodicTask(flexiv::Robot &robot, flexiv::Model &model, flexiv::Log &log,
 
         auto robot_state = robot.states();
         model.Update(robot_state.q, robot_state.dq);
+        // auto gripper_state = gripper.states();
 
         // start = std::clock();
-        sensor_feedback[0] = robot_state.q;
-        sensor_feedback[1] = robot_state.dq; // non-filtered velocities
+        sensor_feedback[0] = vectorToArray<double, K_DOF>(robot_state.q);
+        sensor_feedback[1] = vectorToArray<double, K_DOF>(
+            robot_state.dq); // non-filtered velocities
         // sensor_feedback[1] = dq_array;  // filtered velocities
-        sensor_feedback[2] = robot_state.tau;
+        sensor_feedback[2] = vectorToArray<double, K_DOF>(robot_state.tau);
         wrist_ft_sensed_raw_array = robot_state.ft_sensor_raw;
         external_wrench_at_tcp_array = robot_state.ext_wrench_in_tcp;
         // external_wrench_at_tcp_array = robot_state.ext_wrench_in_tcp_raw;
-
         gravity_vector = model.g();
         coriolis = model.c();
         MassMatrix = model.M();
+        // gripper_current_width[0] = gripper_state.width;
+        // gripper_sensed_grasp_force[0] = gripper_state.force;
 
         Eigen::Map<Eigen::Matrix<double, 7, 1>> _tau(tau_cmd_array.data());
         Eigen::Map<Eigen::Matrix<double, 7, 1>> _sensed_torques(
@@ -330,6 +416,7 @@ void PeriodicTask(flexiv::Robot &robot, flexiv::Model &model, flexiv::Log &log,
 
         redis_client->setGetBatchCommands(key_names, tau_cmd_array, MassMatrix,
                                           sensor_feedback);
+        redis_command_storage_array = tau_cmd_array;
         if (driver_config.robot_type == Sai::Flexiv::RobotType::RIZON_4S) {
             wrist_ft_sensed_raw_force = {wrist_ft_sensed_raw_array[0],
                                          wrist_ft_sensed_raw_array[1],
@@ -354,6 +441,11 @@ void PeriodicTask(flexiv::Robot &robot, flexiv::Model &model, flexiv::Log &log,
         }
         redis_client->setEigenMatrixDerived(ROBOT_GRAVITY_KEY, gravity_vector);
         redis_client->setEigenMatrixDerived(CORIOLIS_KEY, coriolis);
+        // redis_client->setCommandIs(GRIPPER_CURRENT_WIDTH_KEY,
+        //                            std::to_string(gripper_current_width[0]));
+        // redis_client->setCommandIs(
+        //     GRIPPER_SENSED_GRASP_FORCE_KEY,
+        //     std::to_string(gripper_sensed_grasp_force[0]));
 
         // reset containers
         _limited_joints.setZero(); // used to form the constraint jacobian
@@ -684,10 +776,17 @@ void PeriodicTask(flexiv::Robot &robot, flexiv::Model &model, flexiv::Log &log,
         }
 
         // Set joint torques to command torques from Redis
-        std::array<double, flexiv::kJointDOF> target_torque = tau_cmd_array;
+        std::array<double, K_DOF> target_torque = tau_cmd_array;
+
+        bool active_command = false;
+        for (int i = 0; i < 7; ++i) {
+            if (redis_command_storage_array[i] != 0) {
+                active_command = true;
+            }
+        }
 
         // Set 0 joint toruqes
-        // std::array<double, flexiv::kJointDOF> target_torque = {};
+        // std::array<double, K_DOF> target_torque = {};
 
         // Initialization at the start
         if (!initialized_torque_bias) {
@@ -712,6 +811,55 @@ void PeriodicTask(flexiv::Robot &robot, flexiv::Model &model, flexiv::Log &log,
             }
             n_curr++;
 
+        } else if (!active_command) {
+
+            if ((_sensed_torques - gravity_vector).norm() >
+                FREE_DRIVE_THRESHOLD) {
+                not_touching_counter = 0;
+
+                redis_client->setCommandIs(
+                    SAI_DEBUG_KEY, "From Driver - Robot Touch Detected - Floating");
+                // active drive
+                for (int i = 0; i < 7; ++i) {
+                    q_init(i) = robot_state.q[i];
+                    // target_torque[i] += init_torque_bias(i);
+                }
+            } else {
+
+                not_touching_counter++;
+
+                if (not_touching_counter > NOT_TOUCHING_WINDOW) {
+                    // position hold if not touching
+                    redis_client->setCommandIs(
+                        SAI_DEBUG_KEY,
+                        "From Driver - No Touch Detected, Holding");
+                    for (int i = 0; i < 7; ++i) {
+                        target_torque[i] =
+                            -kp_holding_drive[i] *
+                                (robot_state.q[i] - q_init(i)) -
+                            kv_holding_drive[i] * robot_state.dq[i];
+                    }
+                } else {
+                    for (int i = 0; i < 7; ++i) {
+                        q_init(i) = robot_state.q[i];
+                        // target_torque[i] += init_torque_bias(i);
+                        target_torque[i] =
+                            -kv_holding_drive[i] * robot_state.dq[i];
+                    }
+                }
+            }
+
+            // multiply by mass matrix
+            Eigen::VectorXd holding_torques = Eigen::VectorXd::Zero(7);
+            for (int i = 0; i < 7; ++i) {
+                holding_torques(i) = target_torque[i];
+            }
+            Eigen::VectorXd decoupled_holding_torques =
+                MassMatrix * holding_torques;
+            for (int i = 0; i < 7; ++i) {
+                target_torque[i] = decoupled_holding_torques(i);
+            }
+
         } else {
             for (int i = 0; i < 7; ++i) {
                 target_torque[i] += init_torque_bias(i);
@@ -719,20 +867,20 @@ void PeriodicTask(flexiv::Robot &robot, flexiv::Model &model, flexiv::Log &log,
         }
 
         // Add some velocity damping
-        for (size_t i = 0; i < flexiv::kJointDOF; ++i) {
+        for (size_t i = 0; i < K_DOF; ++i) {
             target_torque[i] += -kFloatingDamping[i] * robot.states().dtheta[i];
             // std::cout << target_torque[i] << "\n";
         }
 
-        // Send target joint torque to RDK server, enable gravity compensation
-        // and joint limits soft protection
-        robot.StreamJointTorque(target_torque, true, true);
+        // Send target joint torque to RDK server, enable gravity
+        // compensation and joint limits soft protection
+        robot.StreamJointTorque(arrayToVector(target_torque), true, true);
 
         counter++;
     } catch (const std::exception &e) {
         std::cout << "Error \n"
                   << "\n";
-        log.Error(e.what());
+        spdlog::error(e.what());
         g_stop_sched = true;
     }
 }
@@ -742,11 +890,11 @@ int main(int argc, char **argv) {
     // Program Setup
     // =============================================================================================
     // Logger for printing message with timestamp and coloring
-    flexiv::Log log;
+    // flexiv::Log log;
 
     // Parse parameters
-    if (argc < 2 ||
-        flexiv::utility::ProgramArgsExistAny(argc, argv, {"-h", "--help"})) {
+    if (argc < 2 || flexiv::rdk::utility::ProgramArgsExistAny(
+                        argc, argv, {"-h", "--help"})) {
         PrintHelp();
         return 1;
     }
@@ -787,6 +935,19 @@ int main(int argc, char **argv) {
                                 "redis_driver::" + driver_config.robot_name +
                                 "::safety_controller::constraint_nullspace";
 
+    GRIPPER_PARAMETERS_COMMANDED_KEY = redis_prefix +
+                                       "commands::" + driver_config.robot_name +
+                                       "::gripper::parameters";
+    GRIPPER_MODE_KEY = redis_prefix + "commands::" + driver_config.robot_name +
+                       "::gripper::mode";
+
+    GRIPPER_CURRENT_WIDTH_KEY = redis_prefix +
+                                "sensors::" + driver_config.robot_name +
+                                "::gripper::width";
+    GRIPPER_SENSED_GRASP_FORCE_KEY = redis_prefix +
+                                     "sensors::" + driver_config.robot_name +
+                                     "::gripper::grasp_force";
+
     if (driver_config.robot_type == Sai::Flexiv::RobotType::RIZON_4S) {
         RAW_WRIST_FORCE_SENSED_KEY = redis_prefix +
                                      "sensors::" + driver_config.robot_name +
@@ -801,6 +962,7 @@ int main(int argc, char **argv) {
                                 "sensors::" + driver_config.robot_name +
                                 "::ft_sensor::tcp_moment";
     }
+    SAI_DEBUG_KEY = redis_prefix + "debug";
 
     // start redis client
     Sai::Flexiv::CDatabaseRedisClient *redis_client;
@@ -816,7 +978,8 @@ int main(int argc, char **argv) {
     }
 
     redis_client->setDoubleArray(JOINT_TORQUES_COMMANDED_KEY, tau_cmd_array, 7);
-    // safety to detect if controller is already running : wait 50 milliseconds
+    // safety to detect if controller is already running : wait 50
+    // milliseconds
     usleep(50000);
     redis_client->getDoubleArray(JOINT_TORQUES_COMMANDED_KEY, tau_cmd_array, 7);
     for (int i = 0; i < 7; ++i) {
@@ -826,6 +989,10 @@ int main(int argc, char **argv) {
             return -1;
         }
     }
+
+    redis_client->setEigenMatrixDerivedString(GRIPPER_PARAMETERS_COMMANDED_KEY,
+                                              gripper_parameters);
+    redis_client->setCommandIs(GRIPPER_MODE_KEY, "o");
 
     // prepare batch command
     key_names.push_back(JOINT_TORQUES_COMMANDED_KEY);
@@ -887,74 +1054,93 @@ int main(int argc, char **argv) {
         // RDK Initialization
         // =========================================================================================
         // Instantiate robot interface
-        flexiv::Robot robot(driver_config.serial_number);
+        // flexiv::rdk::Robot robot(driver_config.serial_number,
+        //                          {"192.168.100.11"});
+        flexiv::rdk::Robot robot(driver_config.serial_number,
+                                 {driver_config.computer_ip_address});
+        // flexiv::rdk::Robot robot(driver_config.serial_number);
         // load the kinematics and dynamics model
-        flexiv::Model model(robot);
+        flexiv::rdk::Model model(robot);
 
         // Clear fault on the connected robot if any
         if (robot.fault()) {
-            log.Warn(
-                "Fault occurred on the connected robot, trying to clear ...");
+            spdlog::warn("Fault occurred on the connected robot, trying to "
+                         "clear ...");
             // Try to clear the fault
             if (!robot.ClearFault()) {
-                log.Error("Fault cannot be cleared, exiting ...");
+                spdlog::error("Fault cannot be cleared, exiting ...");
                 return 1;
             }
-            log.Info("Fault on the connected robot is cleared");
+            spdlog::info("Fault on the connected robot is cleared");
         }
 
-        // Enable the robot, make sure the E-stop is released before enabling
-        log.Info("Enabling robot ...");
+        // Enable the robot, make sure the E-stop is released before
+        // enabling
+        spdlog::info("Enabling robot ...");
         robot.Enable();
 
         // Wait for the robot to become operational
         while (!robot.operational()) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
-        log.Info("Robot is now operational");
+        spdlog::info("Robot is now operational");
+
+        // Switch Mode to Primitive Execution
+        robot.SwitchMode(flexiv::rdk::Mode::NRT_PRIMITIVE_EXECUTION);
 
         // Zero Force-torque Sensors
         // =========================================================================================
         // IMPORTANT: must zero force/torque sensor offset for accurate
         // force/torque measurement
-        robot.SwitchMode(flexiv::Mode::NRT_PRIMITIVE_EXECUTION);
-        robot.ExecutePrimitive("ZeroFTSensor()");
+        robot.ExecutePrimitive("ZeroFTSensor",
+                               std::map<std::string, rdk::FlexivDataTypes>{});
 
         // WARNING: during the process, the robot must not contact anything,
         // otherwise the result will be inaccurate and affect following
         // operations
-        log.Info(
+        spdlog::info(
             "Zeroing force/torque sensors, make sure nothing is in contact "
             "with the robot");
 
         // Wait for primitive completion
-        while (robot.busy()) {
+        // while (robot.busy()) {
+        //     std::this_thread::sleep_for(std::chrono::seconds(1));
+        // }
+        while (!std::get<int>(robot.primitive_states()["terminated"])) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
-        log.Info("Sensor zeroing complete");
+        spdlog::info("Sensor zeroing complete");
 
-        // Wait for the primitive to finish
-        while (robot.busy()) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-        }
+        // // Wait for the primitive to finish
+        // while (robot.busy()) {
+        //     std::this_thread::sleep_for(std::chrono::seconds(5));
+        // }
 
-        // Wait for the primitive to finish
-        while (robot.busy()) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-        }
+        // // Instantiate gripper control interface
+        // flexiv::rdk::Gripper gripper(robot);
+
+        // // Manually initialize the gripper, not all grippers need this step
+        // spdlog::info("Initializing gripper, this process takes about 10 "
+        //              "seconds ...");
+        // gripper.Init();
+        
+        // Manual wait for gripper initialization to finish
+        std::this_thread::sleep_for(std::chrono::seconds(12));
+        spdlog::info("Initialization complete");
 
         // Real-time Control
         // =========================================================================================
         // Switch to real-time joint torque control mode
-        robot.SwitchMode(flexiv::Mode::RT_JOINT_TORQUE);
+        robot.SwitchMode(flexiv::rdk::Mode::RT_JOINT_TORQUE);
 
         // Create real-time scheduler to run periodic tasks
-        flexiv::Scheduler scheduler;
-        // Add periodic task with 1ms interval and highest applicable priority
-        scheduler.AddTask(std::bind(PeriodicTask, std::ref(robot),
-                                    std::ref(model), std::ref(log),
+        flexiv::rdk::Scheduler scheduler;
+        // Add periodic task with 1ms interval and highest applicable
+        // priority
+        scheduler.AddTask(std::bind(PeriodicTask, std::ref(robot), std::ref(model),
                                     std::ref(redis_client)),
-                          "HP periodic", 1, scheduler.max_priority());
+                          "HP periodic", 1, driver_config.process_priority,
+                          driver_config.cpu_affinity);
         // Start all added tasks
         scheduler.Start();
 
@@ -966,7 +1152,7 @@ int main(int argc, char **argv) {
         scheduler.Stop();
 
     } catch (const std::exception &e) {
-        log.Error(e.what());
+        spdlog::error(e.what());
         return 1;
     }
 

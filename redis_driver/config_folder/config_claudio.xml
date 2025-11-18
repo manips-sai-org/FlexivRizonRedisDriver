@@ -1,0 +1,10 @@
+<?xml version="1.0" ?>
+
+<saiFlexivDriverConfig robotName="4s-Claudio" 
+                       serialNumber="Rizon4s_062884" 
+                       robotType="Rizon4s" 
+                       gripperName="Flexiv-GN01"
+                       computerIpAddress="192.168.100.11" 
+                       redisPrefix="sai" 
+                       cpuAffinity="4"
+                       processPriority="93"/>

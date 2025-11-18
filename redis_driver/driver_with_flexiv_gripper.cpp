@@ -15,6 +15,7 @@
 #include "SaiFlexivRedisClientLocal.h"
 
 #include <flexiv/rdk/gripper.hpp>
+#include <flexiv/rdk/tool.hpp>
 #include <flexiv/rdk/model.hpp>
 #include <flexiv/rdk/robot.hpp>
 #include <flexiv/rdk/scheduler.hpp>
@@ -1103,26 +1104,69 @@ int main(int argc, char **argv) {
             "with the robot");
 
         // Wait for primitive completion
-        while (robot.busy()) {
+        // while (robot.busy()) {
+        //     std::this_thread::sleep_for(std::chrono::seconds(1));
+        // }
+        while (!std::get<int>(robot.primitive_states()["terminated"])) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
         spdlog::info("Sensor zeroing complete");
 
-        // Wait for the primitive to finish
-        while (robot.busy()) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
-        }
+        // // Wait for the primitive to finish
+        // while (robot.busy()) {
+        //     std::this_thread::sleep_for(std::chrono::seconds(5));
+        // }
 
+        // Gripper Control
+        // =========================================================================================
         // Instantiate gripper control interface
-        flexiv::rdk::Gripper gripper(robot);
+        rdk::Gripper gripper(robot);
 
-        // Manually initialize the gripper, not all grippers need this step
-        spdlog::info("Initializing gripper, this process takes about 10 "
-                     "seconds ...");
-        gripper.Init();
-        // Manual wait for gripper initialization to finish
-        std::this_thread::sleep_for(std::chrono::seconds(12));
-        spdlog::info("Initialization complete");
+        // Instantiate tool interface. Gripper is categorized as both a device and a tool. The
+        // device attribute allows a gripper to be interactively controlled by the user; whereas the
+        // tool attribute tells the robot to account for its mass properties and TCP location.
+        rdk::Tool tool(robot);
+
+        // Enable the specified gripper as a device. This is equivalent to enabling the specified
+        // gripper in Flexiv Elements -> Settings -> Device
+        spdlog::info("Enabling gripper [{}]", driver_config.gripper_name);
+        gripper.Enable(driver_config.gripper_name);
+
+        // Print parameters of the enabled gripper
+        spdlog::info("Gripper params:");
+        std::cout << std::fixed << std::setprecision(3) << "{\n"
+                  << "name: " << gripper.params().name
+                  << "\nmin_width: " << gripper.params().min_width
+                  << "\nmax_width: " << gripper.params().max_width
+                  << "\nmin_force: " << gripper.params().min_force
+                  << "\nmax_force: " << gripper.params().max_force
+                  << "\nmin_vel: " << gripper.params().min_vel
+                  << "\nmax_vel: " << gripper.params().max_vel << "\n}" << std::endl;
+        
+        // User needs to determine if this gripper requires manual initialization
+        int choice = 0;
+        spdlog::info(
+            "Manually trigger initialization for the gripper now? Choose Yes if it's a 48v Grav "
+            "gripper");
+        std::cout << "[1] Skip Gripper Initialization" << std::endl;
+        std::cout << "[2] Perform Gripper Initialization Now" << std::endl;
+        std::cin >> choice;
+
+        // Trigger manual initialization based on choice
+        if (choice == 1) {
+            spdlog::info("Skipped manual initialization");
+        } else if (choice == 2) {
+            gripper.Init();
+            // User determines if the manual initialization is finished
+            spdlog::info(
+                "Triggered manual initialization, press Enter when the initialization is finished "
+                "to continue");
+            std::cin.get();
+            std::cin.get();
+        } else {
+            spdlog::error("Invalid choice");
+            return 1;
+        }
 
         // Real-time Control
         // =========================================================================================
