@@ -1146,8 +1146,7 @@ int main(int argc, char **argv) {
         // User needs to determine if this gripper requires manual initialization
         int choice = 0;
         spdlog::info(
-            "Manually trigger initialization for the gripper now? Choose Yes if it's a 48v Grav "
-            "gripper");
+            "Manually trigger initialization for the gripper now?");
         std::cout << "[1] Skip Gripper Initialization" << std::endl;
         std::cout << "[2] Perform Gripper Initialization Now" << std::endl;
         std::cin >> choice;
