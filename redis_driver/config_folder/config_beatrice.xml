@@ -7,4 +7,4 @@
                        computerIpAddress="192.168.100.11" 
                        redisPrefix="sai" 
                        cpuAffinity="2"
-                       processPriority="93"/>
+                       processPriority="98"/>
