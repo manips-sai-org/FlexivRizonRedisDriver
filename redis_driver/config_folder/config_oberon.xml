@@ -2,8 +2,9 @@
 
 <saiFlexivDriverConfig robotName="4s-Oberon" 
                        serialNumber="Rizon4s_062660" 
-                       robotType="Rizon4s" 
+                       robotType="Rizon4s"
+                       gripperName="Flexiv-GN01" 
                        computerIpAddress="192.168.100.11" 
                        redisPrefix="sai" 
                        cpuAffinity="4"
-                       processPriority="93"/>
+                       processPriority="96"/>
