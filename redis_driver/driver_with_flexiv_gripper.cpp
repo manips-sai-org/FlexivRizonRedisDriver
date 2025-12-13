@@ -14,13 +14,12 @@
 #include "SaiFlexivDriverConfig.h"
 #include "SaiFlexivRedisClientLocal.h"
 
-#include <flexiv/rdk/gripper.hpp>
-#include <flexiv/rdk/model.hpp>
-#include <flexiv/rdk/robot.hpp>
-#include <flexiv/rdk/scheduler.hpp>
-#include <flexiv/rdk/tool.hpp>
-#include <flexiv/rdk/utility.hpp>
-#include <spdlog/spdlog.h>
+#include <flexiv/gripper.h>
+#include <flexiv/log.h>
+#include <flexiv/model.h>
+#include <flexiv/robot.h>
+#include <flexiv/scheduler.h>
+#include <flexiv/utility.h>
 
 #include <atomic>
 #include <cmath>
@@ -310,8 +309,8 @@ void PrintHelp() {
 }
 
 /** @brief Callback function for realtime periodic task */
-void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Gripper &gripper,
-                  flexiv::rdk::Model &model,
+void PeriodicTask(flexiv::Robot &robot, flexiv::Gripper &gripper,
+                  flexiv::Model &model, flexiv::Log &log,
                   Sai::Flexiv::CDatabaseRedisClient *redis_client) {
 
   try {
@@ -325,7 +324,7 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Gripper &gripper,
       gripper_width = gripper_parameters(0);
       gripper_speed = gripper_parameters(1);
       gripper_force = gripper_parameters(2);
-      spdlog::info("Moving Gripper - Width: " + std::to_string(gripper_width) +
+      log.Info("Moving Gripper - Width: " + std::to_string(gripper_width) +
                    "m    Speed: " + std::to_string(gripper_speed) +
                    "m/s    Force: " + std::to_string(gripper_force) + "N");
       gripper.Stop();
@@ -335,13 +334,13 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Gripper &gripper,
 
     // if (gripper_mode != last_gripper_mode) {
     //     if (gripper_mode == "g") {
-    //         spdlog::info("Closing Gripper");
+    //         log.Info("Closing Gripper");
     //         gripper.Move(0, 0.1, 60);
     //     } else if (gripper_mode == "o") {
-    //         spdlog::info("Opening Gripper");
+    //         log.Info("Opening Gripper");
     //         gripper.Move(0.05, 0.1, 60);
     //     } else {
-    //         spdlog::info("Invalid Gripper Command");
+    //         log.Info("Invalid Gripper Command");
     //     }
     //     last_gripper_mode = gripper_mode;
     // }
@@ -387,11 +386,10 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Gripper &gripper,
     auto gripper_state = gripper.states();
 
     // start = std::clock();
-    sensor_feedback[0] = vectorToArray<double, K_DOF>(robot_state.q);
-    sensor_feedback[1] =
-        vectorToArray<double, K_DOF>(robot_state.dq); // non-filtered velocities
+    sensor_feedback[0] = robot_state.q;
+    sensor_feedback[1] = robot_state.dq; // non-filtered velocities
     // sensor_feedback[1] = dq_array;  // filtered velocities
-    sensor_feedback[2] = vectorToArray<double, K_DOF>(robot_state.tau);
+    sensor_feedback[2] = robot_state.tau;
     wrist_ft_sensed_raw_array = robot_state.ft_sensor_raw;
     external_wrench_at_tcp_array = robot_state.ext_wrench_in_tcp;
     // external_wrench_at_tcp_array = robot_state.ext_wrench_in_tcp_raw;
@@ -501,7 +499,13 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Gripper &gripper,
     if (driver_config.verbose) {
       for (int i = 0; i < 7; ++i) {
         if (_pos_limit_flag[i] != SAFE) {
-          std::cout << counter << ": Joint " << i
+        
+// zone 1 and 2 definitions subject to tuning
+double soft_sf = 0.90;             // start of damping zone
+double hard_sf = 0.95;             // start of feedback zone
+double angle_tol = 1 * M_PI / 180; // rad
+double vel_tol = 0.1;              // rad/s (0.1 = 5 deg/s)
+double q_tol = 1e-1 * M_PI / 180;  std::cout << counter << ": Joint " << i
                     << " State: " << limit_state[_pos_limit_flag[i]] << "\n";
           std::cout << "---\n";
         }
@@ -843,13 +847,13 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Gripper &gripper,
 
     // Send target joint torque to RDK server, enable gravity
     // compensation and joint limits soft protection
-    robot.StreamJointTorque(arrayToVector(target_torque), true, true);
+    robot.StreamJointTorque(target_torque, true, true);
 
     counter++;
   } catch (const std::exception &e) {
     std::cout << "Error \n"
               << "\n";
-    spdlog::error(e.what());
+    log.Error(e.what());
     g_stop_sched = true;
   }
 }
@@ -859,11 +863,11 @@ int main(int argc, char **argv) {
   // Program Setup
   // =============================================================================================
   // Logger for printing message with timestamp and coloring
-  // flexiv::Log log;
+  flexiv::Log log;
 
   // Parse parameters
   if (argc < 2 ||
-      flexiv::rdk::utility::ProgramArgsExistAny(argc, argv, {"-h", "--help"})) {
+      flexiv::utility::ProgramArgsExistAny(argc, argv, {"-h", "--help"})) {
     PrintHelp();
     return 1;
   }
@@ -1020,131 +1024,89 @@ int main(int argc, char **argv) {
     // RDK Initialization
     // =========================================================================================
     // Instantiate robot interface
-    // flexiv::rdk::Robot robot(driver_config.serial_number,
+    // flexiv::Robot robot(driver_config.serial_number,
     //                          {"192.168.100.11"});
-    flexiv::rdk::Robot robot(driver_config.serial_number,
-                             {driver_config.computer_ip_address});
-    // flexiv::rdk::Robot robot(driver_config.serial_number);
+    flexiv::Robot robot(driver_config.serial_number);
     // load the kinematics and dynamics model
-    flexiv::rdk::Model model(robot);
+    flexiv::Model model(robot);
 
     // Clear fault on the connected robot if any
     if (robot.fault()) {
-      spdlog::warn("Fault occurred on the connected robot, trying to "
+      log.Warn("Fault occurred on the connected robot, trying to "
                    "clear ...");
       // Try to clear the fault
       if (!robot.ClearFault()) {
-        spdlog::error("Fault cannot be cleared, exiting ...");
+        log.Error("Fault cannot be cleared, exiting ...");
         return 1;
       }
-      spdlog::info("Fault on the connected robot is cleared");
+      log.Info("Fault on the connected robot is cleared");
     }
 
     // Enable the robot, make sure the E-stop is released before
     // enabling
-    spdlog::info("Enabling robot ...");
+    log.Info("Enabling robot ...");
     robot.Enable();
 
     // Wait for the robot to become operational
     while (!robot.operational()) {
       std::this_thread::sleep_for(std::chrono::seconds(1));
     }
-    spdlog::info("Robot is now operational");
+    log.Info("Robot is now operational");
 
     // Switch Mode to Primitive Execution
-    robot.SwitchMode(flexiv::rdk::Mode::NRT_PRIMITIVE_EXECUTION);
+    robot.SwitchMode(flexiv::Mode::NRT_PRIMITIVE_EXECUTION);
 
     // Zero Force-torque Sensors
     // =========================================================================================
     // IMPORTANT: must zero force/torque sensor offset for accurate
     // force/torque measurement
-    robot.ExecutePrimitive("ZeroFTSensor",
-                           std::map<std::string, rdk::FlexivDataTypes>{});
+    robot.ExecutePrimitive("ZeroFTSensor()");
 
     // WARNING: during the process, the robot must not contact anything,
     // otherwise the result will be inaccurate and affect following
     // operations
-    spdlog::info(
+    log.Info(
         "Zeroing force/torque sensors, make sure nothing is in contact "
         "with the robot");
 
     // Wait for primitive completion
-    // while (robot.busy()) {
-    //     std::this_thread::sleep_for(std::chrono::seconds(1));
-    // }
-    while (!std::get<int>(robot.primitive_states()["terminated"])) {
-      std::this_thread::sleep_for(std::chrono::seconds(1));
+    while (robot.busy()) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
     }
-    spdlog::info("Sensor zeroing complete");
+    log.Info("Sensor zeroing complete");
 
-    // // Wait for the primitive to finish
-    // while (robot.busy()) {
-    //     std::this_thread::sleep_for(std::chrono::seconds(5));
-    // }
+    // Wait for the primitive to finish
+    while (robot.busy()) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
 
-    // Gripper Control
-    // =========================================================================================
     // Instantiate gripper control interface
-    rdk::Gripper gripper(robot);
+    flexiv::Gripper gripper(robot);
 
-    // Instantiate tool interface. Gripper is categorized as both a device and a
-    // tool. The device attribute allows a gripper to be interactively
-    // controlled by the user; whereas the tool attribute tells the robot to
-    // account for its mass properties and TCP location.
-    rdk::Tool tool(robot);
+    // Manually initialize the gripper, not all grippers need this step
+    log.Info(
+        "Initializing gripper, this process takes about 10 seconds ...");
+    gripper.Init();
+    log.Info("Initialization complete");
 
-    // Enable the specified gripper as a device. This is equivalent to enabling
-    // the specified gripper in Flexiv Elements -> Settings -> Device
-    spdlog::info("Enabling gripper [{}]", driver_config.gripper_name);
-    gripper.Enable(driver_config.gripper_name);
-
-    // Print parameters of the enabled gripper
-    spdlog::info("Gripper params:");
-    std::cout << std::fixed << std::setprecision(3) << "{\n"
-              << "name: " << gripper.params().name
-              << "\nmin_width: " << gripper.params().min_width
-              << "\nmax_width: " << gripper.params().max_width
-              << "\nmin_force: " << gripper.params().min_force
-              << "\nmax_force: " << gripper.params().max_force
-              << "\nmin_vel: " << gripper.params().min_vel
-              << "\nmax_vel: " << gripper.params().max_vel << "\n}"
-              << std::endl;
-
-    // User needs to determine if this gripper requires manual initialization
-    int choice = 0;
-    spdlog::info("Manually trigger initialization for the gripper now?");
-    std::cout << "[1] Skip Gripper Initialization" << std::endl;
-    std::cout << "[2] Perform Gripper Initialization Now" << std::endl;
-    std::cin >> choice;
-
-    // Trigger manual initialization based on choice
-    if (choice == 1) {
-      spdlog::info("Skipped manual initialization");
-    } else if (choice == 2) {
-      gripper.Init();
-      // User determines if the manual initialization is finished
-      spdlog::info("Triggered manual initialization, press Enter when the "
-                   "initialization is finished "
-                   "to continue");
-      std::cin.get();
-      std::cin.get();
-    } else {
-      spdlog::error("Invalid choice");
-      return 1;
+    // Wait for the primitive to finish
+    while (robot.busy()) {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
     }
 
     // Real-time Control
     // =========================================================================================
     // Switch to real-time joint torque control mode
-    robot.SwitchMode(flexiv::rdk::Mode::RT_JOINT_TORQUE);
+    robot.SwitchMode(flexiv::Mode::RT_JOINT_TORQUE);
+
 
     // Create real-time scheduler to run periodic tasks
-    flexiv::rdk::Scheduler scheduler;
+    flexiv::Scheduler scheduler;
     // Add periodic task with 1ms interval and highest applicable
     // priority
     scheduler.AddTask(std::bind(PeriodicTask, std::ref(robot),
                                 std::ref(gripper), std::ref(model),
-                                std::ref(redis_client)),
+                                std::ref(log), std::ref(redis_client)),
                       "HP periodic", 1, driver_config.process_priority,
                       driver_config.cpu_affinity);
     // Start all added tasks
@@ -1158,7 +1120,7 @@ int main(int argc, char **argv) {
     scheduler.Stop();
 
   } catch (const std::exception &e) {
-    spdlog::error(e.what());
+    log.Error(e.what());
     return 1;
   }
 

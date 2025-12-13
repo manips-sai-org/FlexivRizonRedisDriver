@@ -1,0 +1,10 @@
+<?xml version="1.0" ?>
+
+<saiFlexivDriverConfig robotName="4s-Puck" 
+                       serialNumber="Rizon4s_062232" 
+                       robotType="Rizon4s"
+                       gripperName="None" 
+                       computerIpAddress="192.168.2.107" 
+                       redisPrefix="sai" 
+                       cpuAffinity="3"
+                       processPriority="96"/>
