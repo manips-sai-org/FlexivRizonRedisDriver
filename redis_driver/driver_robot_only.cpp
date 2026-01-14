@@ -104,7 +104,7 @@ std::array<double, 7> dq_array{};
 std::array<double, 7> tau_sensed_array{};
 std::array<double, 6> wrist_ft_sensed_raw_array{};
 std::array<double, 6> external_wrench_at_tcp_array{};
-// std::array<double, 6> external_wrench_at_tcp_unfiltered_array{};
+// std::array<double, 6> external_wrench_at_tcp_raw_array{};
 // std::array<double, 7> gravity_vector{};
 // std::array<double, 7> coriolis{};
 // std::array<double, 49> M_array{};
@@ -116,6 +116,8 @@ std::array<double, 3> wrist_ft_sensed_raw_force{};
 std::array<double, 3> wrist_ft_sensed_raw_moment{};
 std::array<double, 3> tcp_sensed_force{};
 std::array<double, 3> tcp_sensed_moment{};
+// std::array<double, 3> tcp_sensed_raw_force{};
+// std::array<double, 3> tcp_sensed_raw_moment{};
 std::vector<std::string> key_names;
 // bool fDriverRunning = true;
 // void sighandler(int sig)
@@ -343,7 +345,7 @@ void PeriodicTask(flexiv::Robot &robot, flexiv::Model &model, flexiv::Log &log,
     sensor_feedback[2] = robot_state.tau;
     wrist_ft_sensed_raw_array = robot_state.ft_sensor_raw;
     external_wrench_at_tcp_array = robot_state.ext_wrench_in_tcp;
-    // external_wrench_at_tcp_array = robot_state.ext_wrench_in_tcp_raw;
+    // external_wrench_at_tcp_raw_array = robot_state.ext_wrench_in_tcp_raw;
     gravity_vector = model.g();
     coriolis = model.c();
     MassMatrix = model.M();
@@ -372,6 +374,12 @@ void PeriodicTask(flexiv::Robot &robot, flexiv::Model &model, flexiv::Log &log,
       tcp_sensed_moment = {external_wrench_at_tcp_array[3],
                            external_wrench_at_tcp_array[4],
                            external_wrench_at_tcp_array[5]};
+      // tcp_sensed_raw_force = {external_wrench_at_tcp_raw_array[0],
+      //                         external_wrench_at_tcp_raw_array[1],
+      //                         external_wrench_at_tcp_raw_array[2]};
+      // tcp_sensed_raw_moment = {external_wrench_at_tcp_raw_array[3],
+      //                         external_wrench_at_tcp_raw_array[4],
+      //                         external_wrench_at_tcp_raw_array[5]};
       redis_client->setDoubleArray(RAW_WRIST_FORCE_SENSED_KEY,
                                    wrist_ft_sensed_raw_force, 3);
       redis_client->setDoubleArray(RAW_WRIST_MOMENT_SENSED_KEY,
