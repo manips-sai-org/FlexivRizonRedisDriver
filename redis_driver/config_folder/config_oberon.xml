@@ -4,7 +4,7 @@
                        serialNumber="Rizon4s_062660" 
                        robotType="Rizon4s"
                        gripperName="Flexiv-GN01" 
-                       computerIpAddress="192.168.100.11" 
+                       computerIpAddress="192.168.100.10" 
                        redisPrefix="sai" 
                        cpuAffinity="4"
                        processPriority="96"/>
