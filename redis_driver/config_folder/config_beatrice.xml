@@ -1,10 +1,9 @@
 <?xml version="1.0" ?>
 
 <saiFlexivDriverConfig robotName="4s-Beatrice" 
-                       serialNumber="Rizon4s_062908" 
-                       robotType="Rizon4s" 
-                       gripperName="Flexiv-GN01"
-                       computerIpAddress="192.168.100.10" 
+                       serialNumber="Rizon4R_062043" 
+                       robotType="Rizon4" 
+                       computerIpAddress="192.168.100.11" 
                        redisPrefix="sai" 
                        cpuAffinity="2"
-                       processPriority="96"/>
+                       processPriority="90"/>
