@@ -1,16 +1,11 @@
-sudo cpufreq-set -c 1 -g performance
-sudo cpupower -c 1 frequency-set -d 4200MHz 
-sudo cpufreq-set -c 2 -g performance
-sudo cpupower -c 2 frequency-set -d 4200MHz 
-sudo cpufreq-set -c 3 -g performance
-sudo cpupower -c 3 frequency-set -d 4200MHz 
-sudo cpufreq-set -c 4 -g performance
-sudo cpupower -c 4 frequency-set -d 4200MHz 
-sudo cpufreq-set -c 5 -g performance
-sudo cpupower -c 5 frequency-set -d 4200MHz 
-sudo cpufreq-set -c 6 -g performance
-sudo cpupower -c 6 frequency-set -d 4200MHz 
-sudo cpufreq-set -c 7 -g performance
-sudo cpupower -c 7 frequency-set -d 4200MHz 
-sudo taskset --cpu-list 7 chrt -rr 79 ./build/flexiv_rizon4_redis_driver_with_gripper config_titania.xml
-# ./build/flexiv_rizon4_redis_driver_with_gripper config_oberon.xml
+# Set CPU governor and freq
+sudo cpupower -c 1-9 frequency-set -g performance
+sudo cpupower -c 1-9 frequency-set -d 4200MHz
+
+# Run your RT task pinned to CPU 7
+sudo env LD_LIBRARY_PATH=$HOME/rdk_install/lib:$LD_LIBRARY_PATH \
+taskset --cpu-list 6-9 \
+chrt -rr 79 \
+./build/flexiv_rizon4_redis_driver_with_gripper config_titania.xml
+
+

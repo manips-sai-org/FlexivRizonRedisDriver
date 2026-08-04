@@ -857,12 +857,12 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
             Eigen::VectorXd decoupled_holding_torques =
                 MassMatrix * holding_torques;
             for (int i = 0; i < 7; ++i) {
-                target_torque[i] = decoupled_holding_torques(i);
+                target_torque[i] = decoupled_holding_torques(i) + init_torque_bias(i);
             }
 
         } else {
             for (int i = 0; i < 7; ++i) {
-                target_torque[i] += init_torque_bias(i);
+                target_torque[i] += 0 * init_torque_bias(i);
             }
         }
 
@@ -955,9 +955,12 @@ int main(int argc, char **argv) {
         RAW_WRIST_MOMENT_SENSED_KEY = redis_prefix +
                                       "sensors::" + driver_config.robot_name +
                                       "::ft_sensor::moment_raw";
+        // TCP_FORCE_SENSED_KEY = redis_prefix +
+        //                        "sensors::" + driver_config.robot_name +
+        //                        "::ft_sensor::tcp_force";
         TCP_FORCE_SENSED_KEY = redis_prefix +
                                "sensors::" + driver_config.robot_name +
-                               "::ft_sensor::tcp_force";
+                               "::ft_sensor::flange::force";
         TCP_MOMENT_SENSED_KEY = redis_prefix +
                                 "sensors::" + driver_config.robot_name +
                                 "::ft_sensor::tcp_moment";
