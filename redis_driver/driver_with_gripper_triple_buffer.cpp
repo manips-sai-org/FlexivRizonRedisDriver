@@ -60,6 +60,63 @@ std::string GRIPPER_CURRENT_WIDTH_KEY;
 std::string GRIPPER_SENSED_GRASP_FORCE_KEY;
 std::string SAI_DEBUG_KEY;
 
+// Triple Buffer Implementation from
+// https://medium.com/@sgn00/triple-buffer-lock-free-concurrency-primitive-611848627a1e
+template <typename T>
+struct TripleBuffer {
+
+    // Writer API - returns a pointer to the back buffer 
+    // for writer to write into.
+    T* get_for_writer() {
+        return &buffers_[back_idx_];
+    }
+
+    // Writer API - Once finished writing, writer calls 
+    // publish to swap the back and spare buffer.
+    void publish() {
+        BufferStatus new_spare {back_idx_, true};
+        BufferStatus prev_spare = spare_.exchange(new_spare, 
+                                      std::memory_order_acq_rel);
+        back_idx_ = prev_spare.idx;
+    }
+
+    // Reader API - Reader checks if there's an update 
+    // on the spare buffer. If there is, it will swap the 
+    // front and spare buffer.
+    // Then it returns the pointer to front buffer 
+    // for reader to read, and a bool to let reader know 
+    // if this is 'new' data.
+    std::pair<T*, bool> get_for_reader() {
+        BufferStatus curr_spare = spare_.load(std::memory_order_relaxed);
+        bool updated = curr_spare.has_update;
+        if (curr_spare.has_update) {
+            BufferStatus new_spare {front_idx_, false};
+            BufferStatus prev_spare = spare_.exchange(new_spare, 
+                                      std::memory_order_acq_rel);
+            front_idx_ = prev_spare.idx;
+        }
+        return {&buffers_[front_idx_], updated};
+    }
+
+private:
+    // Cache line size for x86-64 architecture is 64 bytes.
+    static constexpr size_t keep_apart_sz = std::hardware_destructive_interference_size;
+
+    struct BufferStatus {
+        int idx;
+        bool has_update;
+    };
+
+    struct alignas(keep_apart_sz) AlignedTripleBuffer {
+        T buf;
+    };
+
+    Buffer buffers_[3];
+    alignas(keep_apart_sz) int front_idx_ = 0;
+    alignas(keep_apart_sz) std::atomic<BufferStatus> spare_ {{1, false}};
+    alignas(keep_apart_sz) int back_idx_ = 2;
+};
+
 // Small POD containers used for buffered lock-free copying between threads
 struct SharedState {
     std::array<double, 7> q_array{};
@@ -67,24 +124,20 @@ struct SharedState {
     std::array<double, 7> tau_sensed_array{};
     std::array<double, 6> wrist_ft_sensed_raw_array{};
     std::array<double, 6> external_wrench_at_tcp_array{};
-    std::array<double, 7> gravity_vector{};
-    std::array<double, 7> coriolis{};
+    std::array<double, 7> gravity_vector_array{};
+    std::array<double, 7> coriolis_array{};
     std::array<double, 49> M_array{};
 };
 
 struct SharedCmd {
     std::array<double, 7> torques{};
     std::array<double, 3> gripper_params{};
-    uint64_t seq = 0; // monotonic sequence for published commands
 };
 
-// Triple buffers and atomics
-static SharedState robot_state_buffer[3];
-static std::atomic<int> state_buffer_idx{0}; // index of the currently visible buffer (0..2)
-
-static SharedCmd control_cmd_buffer[3];
-static std::atomic<int> cmd_buffer_idx{0}; // realtime increments when publishing a new command
-
+// Create one buffer for Robot State (real-time thread writes, redis thred reads)
+// and one buffer for Controller Commands (reids thread writes, real-time thread reads)
+static AlignedTripleBuffer<SharedState> robot_state_buffer;
+static AlignedTripleBuffer<SharedCmd> control_cmd_buffer;
 
 // safety globals
 std::array<double, 7> joint_position_max_default;
@@ -213,8 +266,7 @@ const std::array<double, K_DOF> kFloatingDamping = {
 
 // // data
 // Eigen::MatrixXd MassMatrix;
-// std::array<double, 7> tau_cmd_array{};
-// std::array<double, 7> redis_command_storage_array{};
+std::array<double, 7> redis_command_storage_array{};
 // std::array<double, 7> q_array{};
 // std::array<double, 7> dq_array{};
 // std::array<double, 7> tau_sensed_array{};
@@ -240,9 +292,8 @@ const std::array<double, K_DOF> kFloatingDamping = {
 // // { fDriverRunning = false; }
 
 // gripper command storage
-// Eigen::Vector3d gripper_parameters =
-//     Eigen::Vector3d(0.06, 0.1, 10.0); // width in m, speed in m/s, force in N
-// Eigen::Vector3d last_gripper_parameters = gripper_parameters;
+// gripper parameter initialization
+Eigen::Vector3d last_gripper_parameters =  Eigen::Vector3d(0.06, 0.1, 10.0); // width in m, speed in m/s, force in N
 // double gripper_width;
 // double gripper_speed;
 // double gripper_force;
@@ -341,25 +392,7 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
 
     try {
 
-        // Command Buffer Read
-        int cur_cmd_idx = cmd_buffer_idx.load(std::memory_order_acquire);
-        SharedState cmd_snapshot = control_cmd_buffer[cur_cmd_idx];
-
-        redis_client->getEigenMatrixDerivedString(
-            GRIPPER_PARAMETERS_COMMANDED_KEY, gripper_parameters);
-
-        // if ((gripper_parameters - last_gripper_parameters).norm() > 0.001) {
-        //     gripper_width = gripper_parameters(0);
-        //     gripper_speed = gripper_parameters(1);
-        //     gripper_force = gripper_parameters(2);
-        //     spdlog::info(
-        //         "Moving Gripper - Width: " + std::to_string(gripper_width) +
-        //         "m    Speed: " + std::to_string(gripper_speed) +
-        //         "m/s    Force: " + std::to_string(gripper_force) + "N");
-        //     gripper.Move(gripper_width, gripper_speed, gripper_force);
-        //     last_gripper_parameters = gripper_parameters;
-        // }
-
+        // Reset safety limits to defaults
         for (int i = 0; i < 7; ++i) {
             joint_position_max[i] = default_sf * joint_position_max_default[i];
             joint_position_min[i] = default_sf * joint_position_min_default[i];
@@ -402,60 +435,81 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
                                      "connected robot, exiting ...");
         }
 
+        // Command Buffer Read
+        auto [snapshot_ptr, updated] = control_cmd_buffer.get_for_reader();
+        
+        
+        
+        gripper_parameters = Eigen::Map<Eigen::Vector3d>(snapshot_ptr->gripper_params.data()); 
+        Eigen::Map<Eigen::Matrix<double, 7, 1>> _tau(snapshot_ptr->torques.data());
+
+        if ((gripper_parameters - last_gripper_parameters).norm() > 0.001) {
+            gripper_width = gripper_parameters(0);
+            gripper_speed = gripper_parameters(1);
+            gripper_force = gripper_parameters(2);
+            spdlog::info(
+                "Moving Gripper - Width: " + std::to_string(gripper_width) +
+                "m    Speed: " + std::to_string(gripper_speed) +
+                "m/s    Force: " + std::to_string(gripper_force) + "N");
+            gripper.Move(gripper_width, gripper_speed, gripper_force);
+            last_gripper_parameters = gripper_parameters;
+        }
+
+        // Robot State buffer write
         auto robot_state = robot.states();
         model.Update(robot_state.q, robot_state.dq);
         // auto gripper_state = gripper.states();
+        SharedState *state_snapshot = robot_state_buffer.get_for_writer();
 
         // start = std::clock();
-        sensor_feedback[0] = vectorToArray<double, K_DOF>(robot_state.q);
-        sensor_feedback[1] = vectorToArray<double, K_DOF>(
-            robot_state.dq); // non-filtered velocities
-        // sensor_feedback[1] = dq_array;  // filtered velocities
-        sensor_feedback[2] = vectorToArray<double, K_DOF>(robot_state.tau);
-        wrist_ft_sensed_raw_array = robot_state.ft_sensor_raw;
-        external_wrench_at_tcp_array = robot_state.ext_wrench_in_tcp;
+        state_snapshot->q_array = vectorToArray<double, K_DOF>(robot_state.q);
+        state_snapshot->dq_array = vectorToArray<double, K_DOF>(robot_state.dq); // non-filtered velocities
+        state_snapshot->tau_array = vectorToArray<double, K_DOF>(robot_state.tau);
+        state_snapshot->wrist_ft_sensed_raw_array = robot_state.ft_sensor_raw;
+        state_snapshot->external_wrench_at_tcp_array = robot_state.ext_wrench_in_tcp;
         // external_wrench_at_tcp_array = robot_state.ext_wrench_in_tcp_raw;
-        gravity_vector = model.g();
-        coriolis = model.c();
-        MassMatrix = model.M();
+        state_snapshot->gravity_vector_array = model.g();
+        state_snapshot->coriolis_array = model.c();
+        state_snapshot->M_array = model.M();
         // gripper_current_width[0] = gripper_state.width;
         // gripper_sensed_grasp_force[0] = gripper_state.force;
 
-        Eigen::Map<Eigen::Matrix<double, 7, 1>> _tau(tau_cmd_array.data());
         Eigen::Map<Eigen::Matrix<double, 7, 1>> _sensed_torques(
-            sensor_feedback[2].data()); // sensed torques
+            state_snapshot->tau_array.data()); // sensed torques
         Eigen::Map<Eigen::Matrix<double, 7, 1>> _coriolis(
-            sensor_feedback[4].data());
+            state_snapshot->coriolis_array.data());
+        Eigen::Map<const Eigen::Matrix<double, 7, 7> >_MassMatrix(state_snapshot->M_array.data());
         Eigen::MatrixXd MassMatrixInverse =
-            MassMatrix.llt().solve(Eigen::MatrixXd::Identity(7, 7));
+            _MassMatrix.llt().solve(Eigen::MatrixXd::Identity(7, 7));
 
-        redis_client->setGetBatchCommands(key_names, tau_cmd_array, MassMatrix,
-                                          sensor_feedback);
-        redis_command_storage_array = tau_cmd_array;
-        if (driver_config.robot_type == Sai::Flexiv::RobotType::RIZON_4S) {
-            wrist_ft_sensed_raw_force = {wrist_ft_sensed_raw_array[0],
-                                         wrist_ft_sensed_raw_array[1],
-                                         wrist_ft_sensed_raw_array[2]};
-            wrist_ft_sensed_raw_moment = {wrist_ft_sensed_raw_array[3],
-                                          wrist_ft_sensed_raw_array[4],
-                                          wrist_ft_sensed_raw_array[5]};
-            tcp_sensed_force = {external_wrench_at_tcp_array[0],
-                                external_wrench_at_tcp_array[1],
-                                external_wrench_at_tcp_array[2]};
-            tcp_sensed_moment = {external_wrench_at_tcp_array[3],
-                                 external_wrench_at_tcp_array[4],
-                                 external_wrench_at_tcp_array[5]};
-            redis_client->setDoubleArray(RAW_WRIST_FORCE_SENSED_KEY,
-                                         wrist_ft_sensed_raw_force, 3);
-            redis_client->setDoubleArray(RAW_WRIST_MOMENT_SENSED_KEY,
-                                         wrist_ft_sensed_raw_moment, 3);
-            redis_client->setDoubleArray(TCP_FORCE_SENSED_KEY, tcp_sensed_force,
-                                         3);
-            redis_client->setDoubleArray(TCP_MOMENT_SENSED_KEY,
-                                         tcp_sensed_moment, 3);
-        }
-        redis_client->setEigenMatrixDerived(ROBOT_GRAVITY_KEY, gravity_vector);
-        redis_client->setEigenMatrixDerived(CORIOLIS_KEY, coriolis);
+        robot_state_buffer.publish();
+
+
+        // if (driver_config.robot_type == Sai::Flexiv::RobotType::RIZON_4S) {
+        //     wrist_ft_sensed_raw_force = {wrist_ft_sensed_raw_array[0],
+        //                                  wrist_ft_sensed_raw_array[1],
+        //                                  wrist_ft_sensed_raw_array[2]};
+        //     wrist_ft_sensed_raw_moment = {wrist_ft_sensed_raw_array[3],
+        //                                   wrist_ft_sensed_raw_array[4],
+        //                                   wrist_ft_sensed_raw_array[5]};
+        //     tcp_sensed_force = {external_wrench_at_tcp_array[0],
+        //                         external_wrench_at_tcp_array[1],
+        //                         external_wrench_at_tcp_array[2]};
+        //     tcp_sensed_moment = {external_wrench_at_tcp_array[3],
+        //                          external_wrench_at_tcp_array[4],
+        //                          external_wrench_at_tcp_array[5]};
+        //     redis_client->setDoubleArray(RAW_WRIST_FORCE_SENSED_KEY,
+        //                                  wrist_ft_sensed_raw_force, 3);
+        //     redis_client->setDoubleArray(RAW_WRIST_MOMENT_SENSED_KEY,
+        //                                  wrist_ft_sensed_raw_moment, 3);
+        //     redis_client->setDoubleArray(TCP_FORCE_SENSED_KEY, tcp_sensed_force,
+        //                                  3);
+        //     redis_client->setDoubleArray(TCP_MOMENT_SENSED_KEY,
+        //                                  tcp_sensed_moment, 3);
+        // }
+        // redis_client->setEigenMatrixDerived(ROBOT_GRAVITY_KEY, gravity_vector);
+        // redis_client->setEigenMatrixDerived(CORIOLIS_KEY, coriolis);
+
         // redis_client->setCommandIs(GRIPPER_CURRENT_WIDTH_KEY,
         //                            std::to_string(gripper_current_width[0]));
         // redis_client->setCommandIs(
@@ -685,10 +739,10 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
 
         // safey keys
         _N_s.setIdentity();
-        redis_client->setEigenMatrixDerived(SAFETY_TORQUES_LOGGING_KEY,
-                                            _tau_limited);
-        redis_client->setEigenMatrixDerived(SENT_TORQUES_LOGGING_KEY, _tau);
-        redis_client->setEigenMatrixDerived(CONSTRAINED_NULLSPACE_KEY, _N_s);
+        // redis_client->setEigenMatrixDerived(SAFETY_TORQUES_LOGGING_KEY,
+        //                                     _tau_limited);
+        // redis_client->setEigenMatrixDerived(SENT_TORQUES_LOGGING_KEY, _tau);
+        // redis_client->setEigenMatrixDerived(CONSTRAINED_NULLSPACE_KEY, _N_s);
 
         // safety checks
         // joint torques, velocity and positions
@@ -832,8 +886,8 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
                 FREE_DRIVE_THRESHOLD) {
                 not_touching_counter = 0;
 
-                redis_client->setCommandIs(
-                    SAI_DEBUG_KEY, "From Driver - Robot Touch Detected - Floating");
+                // redis_client->setCommandIs(
+                //     SAI_DEBUG_KEY, "From Driver - Robot Touch Detected - Floating");
                 // active drive
                 for (int i = 0; i < 7; ++i) {
                     q_init(i) = robot_state.q[i];
@@ -845,9 +899,9 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
 
                 if (not_touching_counter > NOT_TOUCHING_WINDOW) {
                     // position hold if not touching
-                    redis_client->setCommandIs(
-                        SAI_DEBUG_KEY,
-                        "From Driver - No Touch Detected, Holding");
+                    // redis_client->setCommandIs(
+                    //     SAI_DEBUG_KEY,
+                    //     "From Driver - No Touch Detected, Holding");
                     for (int i = 0; i < 7; ++i) {
                         target_torque[i] =
                             -kp_holding_drive[i] *
@@ -902,44 +956,13 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
 
 /** @brief Seperated thread for redis Operations*/
 void redisManagerThread(CDatabaseRedisClient *redis_client, std::atomic<bool> &running) {
-    // last command sequence observed by redis thread
-    uint64_t last_sent_seq = 0;
-
-    // Temporary local structures for reads
-    SharedState tmp;
 
     while (running.load(std::memory_order_acquire)) {
         try {
-            // Read sensor keys from Redis into tmp (blocking operations allowed here)
-            redis_client->getDoubleArray(JOINT_ANGLES_KEY, tmp.joint_pos, 7);
-            redis_client->getDoubleArray(JOINT_VELOCITIES_KEY, tmp.joint_vel, 7);
-            // (Optionally) read sensed torques & gripper state if present
-            // redis_client->getDoubleArray(JOINT_TORQUES_SENSED_KEY, tmp.joint_tau, 7);
+            // Read from State Buffer and write to redis
 
-            // Publish snapshot with atomic index flip (publish side)
-            // For triple buffer pick the next slot cyclically; triple buffering gives one spare
-            // slot so the writer won't immediately collide with the reader.
-            int cur = g_sensor_idx.load(std::memory_order_acquire);
-            int write_idx = (cur + 1) % 3;
-
-            // copy is cheap (POD arrays + small Eigen vector)
-            g_sensor_buf[write_idx] = tmp;
-            // Release: make the written data visible before flipping the index
-            g_sensor_idx.store(write_idx, std::memory_order_release);
-
-            // Check for outgoing commands published by realtime loop
-            uint64_t seq = g_cmd_seq.load(std::memory_order_acquire);
-            if (seq != last_sent_seq && seq > 0) {
-                // Copy the command to send
-                SharedCmd to_send = g_cmd_buf[seq % 3];
-
-                // Serialize and send to Redis (batching suggested)
-                // Here we use setDoubleArray to post torques as JSON array
-                redis_client->setDoubleArray(JOINT_TORQUES_CMD_KEY, to_send.torques, 7);
-
-                // Update last_sent_seq when the network sends succeed
-                last_sent_seq = seq;
-            }
+            // Write to Command Buffer from redis keys
+            
 
         } catch (const std::exception &e) {
             std::cerr << "Redis manager error: " << e.what() << "\n";
