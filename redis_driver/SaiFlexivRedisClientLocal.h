@@ -145,44 +145,83 @@ public:
 		}
 	}
 
-	void setGetBatchCommands(const std::vector<string> &cmd_mssg_vec, 
+	// Updated for all redis commands involved in Rizon 4S robots
+	void setGetBatchRizon4S(const std::vector<string> &cmd_mssg_vec, 
 			std::array<double, 7> &get_data_mssg_cmd_torques,
+			std::array<double, 3> &get_data_mssg_gripper_params,
 			const Eigen::MatrixXd &set_data_mssg_massmatrix,
-			const std::vector<std::array<double, 7>> &set_data_mssg_vec)
+			const std::vector<std::array<double, 7>> &set_joint_data_mssg_vec, 
+			const std::vector<std::array<double, 1>> &set_gripper_status_mssg_vec,
+		 	const std::vector<std::array<double, 3>> &set_wrist_data_mssg_vec)
 	{
 		string data_mssg_indiv;
 		string batch_mssg = "";
+		int num_joint_data_msgs = set_joint_data_mssg_vec.size();
+		int num_wrist_data_msgs = set_wrist_data_mssg_vec.size();
+		int num_gripper_status_msgs = set_gripper_status_mssg_vec.size();
 
-		int n_messages = set_data_mssg_vec.size() + 2;
+		int n_messages = num_joint_data_msgs + num_wrist_data_msgs + num_gripper_status_msgs + 3;
 
 		if(cmd_mssg_vec.size() != n_messages)
 		{
 			throw(runtime_error("Not the same number of messages and keys as the expected one in setCommandBatch\n"));
 		}
 
-		// get command
+		// add get command for commanded joint torques from controller
 		int cmd = 0;
 		redisAppendCommand(context_,"GET %s", cmd_mssg_vec[0].c_str());
 		++cmd;
 
-		// set commands
-		hEigentoStringArrayJSON(set_data_mssg_massmatrix, data_mssg_indiv);
-		redisAppendCommand(context_,"SET %s %s", cmd_mssg_vec[1].c_str(), data_mssg_indiv.c_str());
+		// add get command for commanded gripper parameters from controller
+		redisAppendCommand(context_,"GET %s", cmd_mssg_vec[1].c_str());
 		++cmd;
-		for(int i=2; i < n_messages; i++)
+
+		// create set commands for robot-provided mass matrix
+		hEigentoStringArrayJSON(set_data_mssg_massmatrix, data_mssg_indiv);
+		redisAppendCommand(context_,"SET %s %s", cmd_mssg_vec[2].c_str(), data_mssg_indiv.c_str());
+		++cmd;
+
+		// create set commands for joint data from robot
+		for(int i=0; i < num_joint_data_msgs; i++)
 		{
-			hDoubleArraytoStringArrayJSON(set_data_mssg_vec[i-2], 7, data_mssg_indiv);
-			redisAppendCommand(context_,"SET %s %s", cmd_mssg_vec[i].c_str(), data_mssg_indiv.c_str());
+			hDoubleArraytoStringArrayJSON(set_joint_data_mssg_vec[i], 7, data_mssg_indiv);
+			redisAppendCommand(context_,"SET %s %s", cmd_mssg_vec[i+3].c_str(), data_mssg_indiv.c_str());
 			++cmd;
 		}
-	    /* Read (and process) the repliy to the get command */
-		int r = redisGetReply(context_, (void **) &reply_ );
-		if ( r == REDIS_ERR ) { printf("Error\n"); exit(-1); }	    
-		CHECK(reply_);   
-		if(!hDoubleArrayFromStringArrayJSON(get_data_mssg_cmd_torques, 7, reply_->str)) {
-			throw(runtime_error("Could not deserialize custom string to eigen data!"));
+		
+		// create set commands for gripper status data from robot
+		for(int i=0; i < num_gripper_status_msgs; i++)
+		{
+			hDoubleArraytoStringArrayJSON(set_gripper_status_mssg_vec[i], 1, data_mssg_indiv);
+			redisAppendCommand(context_,"SET %s %s", cmd_mssg_vec[i+3+num_joint_data_msgs].c_str(), data_mssg_indiv.c_str());
+			++cmd;
 		}
-		cmd--;
+
+		// create set commands for wrist ft data from robot
+		for(int i=0; i < num_wrist_data_msgs; i++)
+		{
+			hDoubleArraytoStringArrayJSON(set_wrist_data_mssg_vec[i], 3, data_mssg_indiv);
+			redisAppendCommand(context_,"SET %s %s", cmd_mssg_vec[i+3+num_joint_data_msgs+num_gripper_status_msgs].c_str(), data_mssg_indiv.c_str());
+			++cmd;
+		}
+
+	    /* Read (and process) the replies to the get commands for joint commands torque and gripper parameters*/
+		for(int j=0; j<2; j++)
+		{
+			int r = redisGetReply(context_, (void **) &reply_ );
+			if ( r == REDIS_ERR ) { printf("Error\n"); exit(-1); }	    
+			CHECK(reply_);   
+			if(j==0) {
+				if(!hDoubleArrayFromStringArrayJSON(get_data_mssg_cmd_torques, 7, reply_->str)) {
+					throw(runtime_error("Could not deserialize custom string to eigen data!"));
+				}
+			} else if(j==1) {
+				if(!hDoubleArrayFromStringArrayJSON(get_data_mssg_gripper_params, 3, reply_->str)) {
+					throw(runtime_error("Could not deserialize custom string to eigen data!"));
+				}
+			}
+			cmd--;
+		}
 
 	    /* Read (and ignore) the replies to the set commands */
 		while ( cmd-- > 0 )
