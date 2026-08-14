@@ -102,17 +102,16 @@ enum Limit {
 
 // data
 Eigen::MatrixXd MassMatrix;
+Eigen::VectorXd gravity_vector;
+Eigen::VectorXd coriolis;
 std::array<double, 7> tau_cmd_array{};
 std::array<double, 7> redis_command_storage_array{};
 std::array<double, 7> q_array{};
 std::array<double, 7> dq_array{};
 std::array<double, 7> tau_sensed_array{};
-std::array<double, 7> gravity_vector{};
-std::array<double, 7> coriolis{};
+std::array<double, 7> gravity_vector_array{};
+std::array<double, 7> coriolis_array{};
 // std::array<double, 49> M_array{};
-// Eigen::VectorXd gravity_vector{};
-// Eigen::VectorXd coriolis{};
-Eigen::MatrixXd M_array{};
 std::vector<std::array<double, 7>> robot_joint_sensor_feedback;
 std::array<double, 6> wrist_ft_sensed_raw_array{};
 std::array<double, 6> external_wrench_at_tcp_array{};
@@ -122,8 +121,8 @@ std::array<double, 3> wrist_ft_sensed_raw_moment{};
 std::array<double, 3> tcp_sensed_force{};
 std::array<double, 3> tcp_sensed_moment{};
 std::vector<std::array<double, 3>> robot_wrist_ft_sensor_feedback;
-double gripper_current_width;
-double gripper_sensed_grasp_force;
+std::array<double, 1>  gripper_current_width{};
+std::array<double, 1>  gripper_sensed_grasp_force{};
 std::vector<std::array<double, 1>> gripper_status_feedback;
 std::vector<std::string> set_get_batch_key_names;
 // bool fDriverRunning = true;
@@ -133,6 +132,8 @@ std::vector<std::string> set_get_batch_key_names;
 // gripper command storage
 std::array<double, 3> gripper_parameters_array = {0.06, 0.1, 10.0}; // width in m, speed in m/s, force in N
 std::array<double, 3> last_gripper_parameters_array = gripper_parameters_array;
+Eigen::Vector3d gripper_parameters = Eigen::Map<Eigen::Vector3d>(gripper_parameters_array.data());
+Eigen::Vector3d last_gripper_parameters = gripper_parameters;
 double gripper_width;
 double gripper_speed;
 double gripper_force;
@@ -356,31 +357,42 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Gripper &gripper,
     model.Update(robot_state.q, robot_state.dq);
     auto gripper_state = gripper.states();
 
-    robot_joint_sensor_feedback[0] = vectorToArray<double, K_DOF>(robot_state.q);
-    robot_joint_sensor_feedback[1] =
-        vectorToArray<double, K_DOF>(robot_state.dq); // non-filtered velocities
-    // robot_joint_sensor_feedback[1] = dq_array;  // filtered velocities
-    robot_joint_sensor_feedback[2] = vectorToArray<double, K_DOF>(robot_state.tau);
+    q_array = vectorToArray<double, K_DOF>(robot_state.q);
+    dq_array = vectorToArray<double, K_DOF>(robot_state.dq); // non-filtered velocities
+    // dq_array = dq_array;  // filtered velocities
+    tau_sensed_array = vectorToArray<double, K_DOF>(robot_state.tau);
+    gravity_vector = model.g();
+    // std::cout << "Gravity vector: " << gravity_vector.transpose() << std::endl;
+    coriolis = model.c();
+    Eigen::Map<Eigen::VectorXd>(gravity_vector_array.data(), gravity_vector_array.size()) = gravity_vector;
+    Eigen::Map<Eigen::VectorXd>(coriolis_array.data(), coriolis_array.size()) = coriolis;
+
+    // fill joint sensor feedback vector
+    robot_joint_sensor_feedback[0] = q_array;
+    robot_joint_sensor_feedback[1] = dq_array;
+    robot_joint_sensor_feedback[2] = tau_sensed_array;
+    robot_joint_sensor_feedback[3] = gravity_vector_array;
+    robot_joint_sensor_feedback[4] = coriolis_array;
+
+    // std::cout << "Gravity vector array: " << gravity_vector_array[0] << ", "
+    //           << gravity_vector_array[1] << ", " << gravity_vector_array[2]
+    //           << ", " << gravity_vector_array[3] << ", "
+    //           << gravity_vector_array[4] << ", " << gravity_vector_array[5]
+    //           << ", " << gravity_vector_array[6] << std::endl;
+
+    // store robot mass matrix
+    MassMatrix = model.M();
+
+    gripper_current_width[0] = gripper_state.width;
+    gripper_sensed_grasp_force[0] = gripper_state.force;
+
+    // fill gripper status vector
+    gripper_status_feedback[0] = gripper_current_width;
+    gripper_status_feedback[1] = gripper_sensed_grasp_force;
+
     wrist_ft_sensed_raw_array = robot_state.ft_sensor_raw;
     external_wrench_at_tcp_array = robot_state.ext_wrench_in_tcp;
     // external_wrench_at_tcp_array = robot_state.ext_wrench_in_tcp_raw;
-    Eigen::Map<Eigen::VectorXd>(gravity_vector.data(), gravity_vector.size()) = model.g();
-    Eigen::Map<Eigen::VectorXd>(coriolis.data(), coriolis.size()) = model.c();
-    MassMatrix = model.M();
-    gripper_current_width = gripper_state.width;
-    gripper_sensed_grasp_force = gripper_state.force;
-    gripper_status_feedback[0] = {gripper_current_width};
-    gripper_status_feedback[1] = {gripper_sensed_grasp_force};
-
-
-    Eigen::Map<Eigen::Matrix<double, 7, 1>> _tau(tau_cmd_array.data());
-    Eigen::Map<Eigen::Matrix<double, 7, 1>> _sensed_torques(
-        robot_joint_sensor_feedback[2].data()); // sensed torques
-    Eigen::Map<Eigen::Matrix<double, 7, 1>> _coriolis(
-        robot_joint_sensor_feedback[4].data());
-    Eigen::MatrixXd MassMatrixInverse =
-        MassMatrix.llt().solve(Eigen::MatrixXd::Identity(7, 7));
-
     wrist_ft_sensed_raw_force = {wrist_ft_sensed_raw_array[0],
                                   wrist_ft_sensed_raw_array[1],
                                   wrist_ft_sensed_raw_array[2]};
@@ -394,11 +406,40 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Gripper &gripper,
                           external_wrench_at_tcp_array[4],
                            external_wrench_at_tcp_array[5]};
 
+    // fill wrist force-torque sensor feedback vector
+    robot_wrist_ft_sensor_feedback[0] = wrist_ft_sensed_raw_force;
+    robot_wrist_ft_sensor_feedback[1] = wrist_ft_sensed_raw_moment;
+    robot_wrist_ft_sensor_feedback[2] = tcp_sensed_force;
+    robot_wrist_ft_sensor_feedback[3] = tcp_sensed_moment;
+
+    Eigen::Map<Eigen::Matrix<double, 7, 1>> _tau(tau_cmd_array.data());
+    Eigen::Map<Eigen::Matrix<double, 7, 1>> _sensed_torques(
+        tau_sensed_array.data()); // sensed torques
+    Eigen::Map<Eigen::Matrix<double, 7, 1>> _coriolis(
+        coriolis_array.data());
+    Eigen::MatrixXd MassMatrixInverse =
+        MassMatrix.llt().solve(Eigen::MatrixXd::Identity(7, 7));
+
     redis_client->setGetBatchRizon4S(set_get_batch_key_names, tau_cmd_array, gripper_parameters_array, MassMatrix,
                                       robot_joint_sensor_feedback, gripper_status_feedback, robot_wrist_ft_sensor_feedback);
     
     // for checking if the controller is running before the driver
-    redis_command_storage_array = tau_cmd_array;                          
+    redis_command_storage_array = tau_cmd_array;                    
+    
+    // send gripper command
+    gripper_parameters = Eigen::Map<Eigen::Vector3d>(gripper_parameters_array.data());
+
+    if ((gripper_parameters - last_gripper_parameters).norm() > 0.001) {
+      gripper_width = gripper_parameters(0);
+      gripper_speed = gripper_parameters(1);
+      gripper_force = gripper_parameters(2);
+      spdlog::info("Moving Gripper - Width: " + std::to_string(gripper_width) +
+                   "m    Speed: " + std::to_string(gripper_speed) +
+                   "m/s    Force: " + std::to_string(gripper_force) + "N");
+      gripper.Stop();
+      gripper.Move(gripper_width, gripper_speed, gripper_force);
+      last_gripper_parameters = gripper_parameters;
+    }
 
     // reset containers
     _limited_joints.setZero(); // used to form the constraint jacobian
@@ -934,13 +975,13 @@ int main(int argc, char **argv) {
   robot_joint_sensor_feedback.push_back(q_array);
   robot_joint_sensor_feedback.push_back(dq_array);
   robot_joint_sensor_feedback.push_back(tau_sensed_array);
-  robot_joint_sensor_feedback.push_back(gravity_vector);
-  robot_joint_sensor_feedback.push_back(coriolis);
+  robot_joint_sensor_feedback.push_back(gravity_vector_array);
+  robot_joint_sensor_feedback.push_back(coriolis_array);
 
   gripper_status_feedback.push_back(gripper_current_width);
   gripper_status_feedback.push_back(gripper_sensed_grasp_force);
 
-  // Add additional keys if rizon model is 4S
+  // Add additional keys and data if rizon model is 4S
   if (driver_config.robot_type == Sai::Flexiv::RobotType::RIZON_4S) {
     set_get_batch_key_names.push_back(RAW_WRIST_FORCE_SENSED_KEY);
     set_get_batch_key_names.push_back(RAW_WRIST_MOMENT_SENSED_KEY);

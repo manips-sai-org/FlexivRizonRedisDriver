@@ -213,11 +213,11 @@ public:
 			CHECK(reply_);   
 			if(j==0) {
 				if(!hDoubleArrayFromStringArrayJSON(get_data_mssg_cmd_torques, 7, reply_->str)) {
-					throw(runtime_error("Could not deserialize custom string to eigen data!"));
+					throw(runtime_error("Could not deserialize joint command torques custom string to eigen data!"));
 				}
 			} else if(j==1) {
 				if(!hDoubleArrayFromStringArrayJSON(get_data_mssg_gripper_params, 3, reply_->str)) {
-					throw(runtime_error("Could not deserialize custom string to eigen data!"));
+					throw(runtime_error("Could not deserialize gripper parameters custom string to eigen data!"));
 				}
 			}
 			cmd--;
