@@ -1075,6 +1075,10 @@ int main(int argc, char **argv) {
     }
     spdlog::info("Robot is now operational");
 
+    // Update timeliness error limit to be more relaxed from default. 
+    // Limit specified as percentage of allowable missed timepoints
+    robot.SetTimelinessFailureLimit(5.0);
+
     // Switch Mode to Primitive Execution
     robot.SwitchMode(flexiv::rdk::Mode::NRT_PRIMITIVE_EXECUTION);
 
