@@ -144,9 +144,73 @@ public:
 			freeReplyObject(reply_);
 		}
 	}
+	
+	// Updated for all redis commands involved in Rizon 4 and 4S robots without grippers
+	void setGetBatchRizon4NoGripper(const std::vector<string> &cmd_mssg_vec, 
+			std::array<double, 7> &get_data_mssg_cmd_torques,
+			const Eigen::MatrixXd &set_data_mssg_massmatrix,
+			const std::vector<std::array<double, 7>> &set_joint_data_mssg_vec, 
+		 	const std::vector<std::array<double, 3>> &set_wrist_data_mssg_vec)
+	{
+		string data_mssg_indiv;
+		string batch_mssg = "";
+		int num_joint_data_msgs = set_joint_data_mssg_vec.size();
+		int num_wrist_data_msgs = set_wrist_data_mssg_vec.size();
 
-	// Updated for all redis commands involved in Rizon 4S robots
-	void setGetBatchRizon4S(const std::vector<string> &cmd_mssg_vec, 
+		int n_messages = num_joint_data_msgs + num_wrist_data_msgs + 2;
+
+		if(cmd_mssg_vec.size() != n_messages)
+		{
+			throw(runtime_error("Not the same number of messages and keys as the expected one in setCommandBatch\n"));
+		}
+
+		// add get command for commanded joint torques from controller
+		int cmd = 0;
+		redisAppendCommand(context_,"GET %s", cmd_mssg_vec[0].c_str());
+		++cmd;
+
+		// create set commands for robot-provided mass matrix
+		hEigentoStringArrayJSON(set_data_mssg_massmatrix, data_mssg_indiv);
+		redisAppendCommand(context_,"SET %s %s", cmd_mssg_vec[1].c_str(), data_mssg_indiv.c_str());
+		++cmd;
+
+		// create set commands for joint data from robot
+		for(int i=0; i < num_joint_data_msgs; i++)
+		{
+			hDoubleArraytoStringArrayJSON(set_joint_data_mssg_vec[i], 7, data_mssg_indiv);
+			redisAppendCommand(context_,"SET %s %s", cmd_mssg_vec[i+2].c_str(), data_mssg_indiv.c_str());
+			++cmd;
+		}
+
+		// create set commands for wrist ft data from robot
+		for(int i=0; i < num_wrist_data_msgs; i++)
+		{
+			hDoubleArraytoStringArrayJSON(set_wrist_data_mssg_vec[i], 3, data_mssg_indiv);
+			redisAppendCommand(context_,"SET %s %s", cmd_mssg_vec[i+2+num_joint_data_msgs].c_str(), data_mssg_indiv.c_str());
+			++cmd;
+		}
+
+	    /* Read (and process) the replies to the get commands for joint commands torque*/
+		int r = redisGetReply(context_, (void **) &reply_ );
+		if ( r == REDIS_ERR ) { printf("Error\n"); exit(-1); }	    
+		CHECK(reply_);   
+		if(!hDoubleArrayFromStringArrayJSON(get_data_mssg_cmd_torques, 7, reply_->str)) {
+			throw(runtime_error("Could not deserialize joint command torques custom string to eigen data!"));
+		}
+		cmd--;
+
+	    /* Read (and ignore) the replies to the set commands */
+		while ( cmd-- > 0 )
+		{
+			int r = redisGetReply(context_, (void **) &reply_ );
+			if ( r == REDIS_ERR ) { printf("Error\n"); exit(-1); }
+			CHECK(reply_);        
+			freeReplyObject(reply_);
+		}
+	}
+
+	// Updated for all redis commands involved in Rizon 4 and 4S robots with grippers
+	void setGetBatchRizon4Gripper(const std::vector<string> &cmd_mssg_vec, 
 			std::array<double, 7> &get_data_mssg_cmd_torques,
 			std::array<double, 3> &get_data_mssg_gripper_params,
 			const Eigen::MatrixXd &set_data_mssg_massmatrix,

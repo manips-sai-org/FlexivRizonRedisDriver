@@ -420,7 +420,7 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Gripper &gripper,
     Eigen::MatrixXd MassMatrixInverse =
         MassMatrix.llt().solve(Eigen::MatrixXd::Identity(7, 7));
 
-    redis_client->setGetBatchRizon4S(set_get_batch_key_names, tau_cmd_array, gripper_parameters_array, MassMatrix,
+    redis_client->setGetBatchRizon4Gripper(set_get_batch_key_names, tau_cmd_array, gripper_parameters_array, MassMatrix,
                                       robot_joint_sensor_feedback, gripper_status_feedback, robot_wrist_ft_sensor_feedback);
     
     // for checking if the controller is running before the driver
