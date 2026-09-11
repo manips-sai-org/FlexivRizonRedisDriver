@@ -72,6 +72,9 @@ public:
 	bool getCommandIs(const string &cmd_mssg) {
 		reply_ = (redisReply *)redisCommand(context_, "GET %s", cmd_mssg.c_str());
 		if (NULL == reply_ || REDIS_REPLY_ERROR == reply_->type) {
+			if (NULL != reply_) {
+				freeReplyObject((void*)reply_);
+			}
 			throw(runtime_error("Server error in fetching data!"));
 			//TODO: indicate what error
 		}
@@ -85,28 +88,46 @@ public:
 	bool getCommandIs(const string &cmd_mssg, string &ret_string) {
 		reply_ = (redisReply *)redisCommand(context_, "GET %s", cmd_mssg.c_str());
 		if (NULL == reply_ || REDIS_REPLY_ERROR == reply_->type) {
+			if (NULL != reply_) {
+				freeReplyObject((void*)reply_);
+			}
 			throw(runtime_error("Server error in fetching data!"));
 			//TODO: indicate what error
 		}
 		if (REDIS_REPLY_NIL == reply_->type) {
 			// cout << "\nNo data on server.. Missing key?";
+			freeReplyObject((void*)reply_);
 			return false;
 		}
+		if (REDIS_REPLY_STRING != reply_->type) {
+			freeReplyObject((void*)reply_);
+			throw(runtime_error("Unexpected Redis reply type in fetching string data!"));
+		}
 		ret_string = reply_->str;
+		freeReplyObject((void*)reply_);
 		return true;
 	}
 
 	bool getCommandIs(const string &cmd_mssg, double &ret_double) {
 		reply_ = (redisReply *)redisCommand(context_, "GET %s", cmd_mssg.c_str());
 		if (NULL == reply_ || REDIS_REPLY_ERROR == reply_->type) {
+			if (NULL != reply_) {
+				freeReplyObject((void*)reply_);
+			}
 			throw(runtime_error("Server error in fetching data!"));
 			//TODO: indicate what error
 		}
 		if (REDIS_REPLY_NIL == reply_->type) {
 			// cout << "\nNo data on server.. Missing key?";
+			freeReplyObject((void*)reply_);
 			return false;
 		}
+		if (REDIS_REPLY_STRING != reply_->type) {
+			freeReplyObject((void*)reply_);
+			throw(runtime_error("Unexpected Redis reply type in fetching double data!"));
+		}
 		ret_double = std::stod(reply_->str);
+		freeReplyObject((void*)reply_);
 		return true;
 	}
 
@@ -211,14 +232,30 @@ public:
 			int r = redisGetReply(context_, (void **) &reply_ );
 			if ( r == REDIS_ERR ) { printf("Error\n"); exit(-1); }	    
 			CHECK(reply_);   
+			bool parse_success = true;
 			if(j==0) {
-				if(!hDoubleArrayFromStringArrayJSON(get_data_mssg_cmd_torques, 7, reply_->str)) {
-					throw(runtime_error("Could not deserialize joint command torques custom string to eigen data!"));
+				if(reply_->type != REDIS_REPLY_NIL) {
+					if(reply_->type != REDIS_REPLY_STRING) {
+						parse_success = false;
+					} else {
+						parse_success = hDoubleArrayFromStringArrayJSON(
+							get_data_mssg_cmd_torques, 7, reply_->str);
+					}
 				}
 			} else if(j==1) {
-				if(!hDoubleArrayFromStringArrayJSON(get_data_mssg_gripper_params, 3, reply_->str)) {
-					throw(runtime_error("Could not deserialize gripper parameters custom string to eigen data!"));
+				if(reply_->type != REDIS_REPLY_NIL) {
+					if(reply_->type != REDIS_REPLY_STRING) {
+						parse_success = false;
+					} else {
+						parse_success = hDoubleArrayFromStringArrayJSON(
+							get_data_mssg_gripper_params, 3, reply_->str);
+					}
 				}
+			}
+			freeReplyObject(reply_);
+			if(!parse_success) {
+				throw(runtime_error(
+					"Could not deserialize Redis command array data!"));
 			}
 			cmd--;
 		}

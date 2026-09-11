@@ -244,6 +244,26 @@ std::array<T, N> vectorToArray(const std::vector<T> &vec) {
   return arr;
 }
 
+std::array<double, K_DOF * K_DOF> matrix7ToArray(const Matrix7d &matrix) {
+  std::array<double, K_DOF * K_DOF> arr{};
+  for (int row = 0; row < K_DOF; ++row) {
+    for (int col = 0; col < K_DOF; ++col) {
+      arr[row * K_DOF + col] = matrix(row, col);
+    }
+  }
+  return arr;
+}
+
+Matrix7d arrayToMatrix7d(const std::array<double, K_DOF * K_DOF> &arr) {
+  Matrix7d matrix;
+  for (int row = 0; row < K_DOF; ++row) {
+    for (int col = 0; col < K_DOF; ++col) {
+      matrix(row, col) = arr[row * K_DOF + col];
+    }
+  }
+  return matrix;
+}
+
 /** Atomic signal to stop scheduler tasks */
 std::atomic<bool> g_stop_sched = {false};
 
@@ -344,7 +364,7 @@ struct RobotStateExchangeData {
   std::array<double, 3> wrist_ft_sensed_raw_moment{};
   std::array<double, 3> tcp_sensed_force{};
   std::array<double, 3> tcp_sensed_moment{};
-  Matrix7d mass_matrix = Matrix7d::Zero();
+  std::array<double, K_DOF * K_DOF> mass_matrix{};
 
   bool state_ready = false;
 };
@@ -479,6 +499,8 @@ void RedisManagerThread(Sai::Flexiv::CDatabaseRedisClient *redis_client,
                                               gripper_status_sequence);
 
       if (latest_robot_state.state_ready) {
+        const Matrix7d latest_mass_matrix =
+            arrayToMatrix7d(latest_robot_state.mass_matrix);
         std::vector<std::array<double, K_DOF>> joint_sensor_feedback = {
             latest_robot_state.joint_positions,
             latest_robot_state.joint_velocities,
@@ -502,7 +524,7 @@ void RedisManagerThread(Sai::Flexiv::CDatabaseRedisClient *redis_client,
 
         redis_client->setGetBatchRizon4S(
             set_get_batch_key_names, command_torques,
-            redis_gripper_parameters, latest_robot_state.mass_matrix,
+            redis_gripper_parameters, latest_mass_matrix,
             joint_sensor_feedback, gripper_status_feedback,
             wrist_ft_sensor_feedback);
       } else {
@@ -674,7 +696,7 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Model &model) {
     state_update.wrist_ft_sensed_raw_moment = wrist_ft_sensed_raw_moment;
     state_update.tcp_sensed_force = tcp_sensed_force;
     state_update.tcp_sensed_moment = tcp_sensed_moment;
-    state_update.mass_matrix = MassMatrix;
+    state_update.mass_matrix = matrix7ToArray(MassMatrix);
     state_update.state_ready = true;
     robot_state_exchange.try_publish(state_update);
 

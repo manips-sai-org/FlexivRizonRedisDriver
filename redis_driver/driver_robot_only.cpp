@@ -240,6 +240,50 @@ std::array<T, N> vectorToArray(const std::vector<T> &vec) {
     return arr;
 }
 
+std::array<double, K_DOF> vector7ToArray(const Vector7d &vec) {
+    std::array<double, K_DOF> arr{};
+    for (int i = 0; i < K_DOF; ++i) {
+        arr[i] = vec(i);
+    }
+    return arr;
+}
+
+Vector7d arrayToVector7d(const std::array<double, K_DOF> &arr) {
+    Vector7d vec;
+    for (int i = 0; i < K_DOF; ++i) {
+        vec(i) = arr[i];
+    }
+    return vec;
+}
+
+std::array<double, K_DOF * K_DOF> matrix7ToArray(const Matrix7d &matrix) {
+    std::array<double, K_DOF * K_DOF> arr{};
+    for (int row = 0; row < K_DOF; ++row) {
+        for (int col = 0; col < K_DOF; ++col) {
+            arr[row * K_DOF + col] = matrix(row, col);
+        }
+    }
+    return arr;
+}
+
+Matrix7d arrayToMatrix7d(const std::array<double, K_DOF * K_DOF> &arr) {
+    Matrix7d matrix;
+    for (int row = 0; row < K_DOF; ++row) {
+        for (int col = 0; col < K_DOF; ++col) {
+            matrix(row, col) = arr[row * K_DOF + col];
+        }
+    }
+    return matrix;
+}
+
+std::array<double, 3> vector3ToArray(const Eigen::Vector3d &vec) {
+    return {vec(0), vec(1), vec(2)};
+}
+
+Eigen::Vector3d arrayToVector3d(const std::array<double, 3> &arr) {
+    return Eigen::Vector3d(arr[0], arr[1], arr[2]);
+}
+
 /** Atomic signal to stop scheduler tasks */
 std::atomic<bool> g_stop_sched = {false};
 
@@ -325,7 +369,7 @@ class DoubleBufferExchange {
 
 struct RedisCommandData {
     std::array<double, K_DOF> command_torques{};
-    Eigen::Vector3d gripper_parameters = Eigen::Vector3d(0.06, 0.1, 10.0);
+    std::array<double, 3> gripper_parameters = {0.06, 0.1, 10.0};
     char gripper_mode = 'o';
 };
 
@@ -337,17 +381,17 @@ struct RobotStateExchangeData {
     std::array<double, 3> wrist_ft_sensed_raw_moment{};
     std::array<double, 3> tcp_sensed_force{};
     std::array<double, 3> tcp_sensed_moment{};
-    Matrix7d mass_matrix = Matrix7d::Zero();
-    Vector7d gravity = Vector7d::Zero();
-    Vector7d coriolis = Vector7d::Zero();
+    std::array<double, K_DOF * K_DOF> mass_matrix{};
+    std::array<double, K_DOF> gravity{};
+    std::array<double, K_DOF> coriolis{};
 
     bool state_ready = false;
 };
 
 struct SafetyExchangeData {
-    Vector7d safety_torques = Vector7d::Zero();
-    Vector7d sent_torques = Vector7d::Zero();
-    Matrix7d constrained_nullspace = Matrix7d::Identity();
+    std::array<double, K_DOF> safety_torques{};
+    std::array<double, K_DOF> sent_torques{};
+    std::array<double, K_DOF * K_DOF> constrained_nullspace{};
 
     bool safety_ready = false;
 };
@@ -479,7 +523,8 @@ void RedisManagerThread(Sai::Flexiv::CDatabaseRedisClient *redis_client,
     RedisCommandData command_snapshot;
     if (redis_command_exchange.try_read(command_snapshot)) {
         command_torques = command_snapshot.command_torques;
-        redis_gripper_parameters = command_snapshot.gripper_parameters;
+        redis_gripper_parameters =
+            arrayToVector3d(command_snapshot.gripper_parameters);
         redis_gripper_mode.assign(1, command_snapshot.gripper_mode);
     }
 
@@ -503,6 +548,13 @@ void RedisManagerThread(Sai::Flexiv::CDatabaseRedisClient *redis_client,
             }
 
             if (latest_state.state_ready) {
+                const Matrix7d latest_mass_matrix =
+                    arrayToMatrix7d(latest_state.mass_matrix);
+                const Vector7d latest_gravity =
+                    arrayToVector7d(latest_state.gravity);
+                const Vector7d latest_coriolis =
+                    arrayToVector7d(latest_state.coriolis);
+
                 redis_client->setDoubleArray(JOINT_ANGLES_KEY,
                                              latest_state.joint_positions,
                                              K_DOF);
@@ -513,11 +565,11 @@ void RedisManagerThread(Sai::Flexiv::CDatabaseRedisClient *redis_client,
                                              latest_state.sensed_torques,
                                              K_DOF);
                 redis_client->setEigenMatrixDerived(MASSMATRIX_KEY,
-                                                    latest_state.mass_matrix);
+                                                    latest_mass_matrix);
                 redis_client->setEigenMatrixDerived(ROBOT_GRAVITY_KEY,
-                                                    latest_state.gravity);
+                                                    latest_gravity);
                 redis_client->setEigenMatrixDerived(CORIOLIS_KEY,
-                                                    latest_state.coriolis);
+                                                    latest_coriolis);
 
                 if (driver_config.robot_type == Sai::Flexiv::RobotType::RIZON_4S) {
                     redis_client->setDoubleArray(
@@ -536,12 +588,19 @@ void RedisManagerThread(Sai::Flexiv::CDatabaseRedisClient *redis_client,
             }
 
             if (latest_safety.safety_ready) {
+                const Vector7d latest_safety_torques =
+                    arrayToVector7d(latest_safety.safety_torques);
+                const Vector7d latest_sent_torques =
+                    arrayToVector7d(latest_safety.sent_torques);
+                const Matrix7d latest_constrained_nullspace =
+                    arrayToMatrix7d(latest_safety.constrained_nullspace);
+
                 redis_client->setEigenMatrixDerived(SAFETY_TORQUES_LOGGING_KEY,
-                                                    latest_safety.safety_torques);
+                                                    latest_safety_torques);
                 redis_client->setEigenMatrixDerived(SENT_TORQUES_LOGGING_KEY,
-                                                    latest_safety.sent_torques);
+                                                    latest_sent_torques);
                 redis_client->setEigenMatrixDerived(CONSTRAINED_NULLSPACE_KEY,
-                                                    latest_safety.constrained_nullspace);
+                                                    latest_constrained_nullspace);
             }
 
             RedisDebugData debug_data;
@@ -554,7 +613,8 @@ void RedisManagerThread(Sai::Flexiv::CDatabaseRedisClient *redis_client,
 
             RedisCommandData command_update;
             command_update.command_torques = command_torques;
-            command_update.gripper_parameters = redis_gripper_parameters;
+            command_update.gripper_parameters =
+                vector3ToArray(redis_gripper_parameters);
             command_update.gripper_mode =
                 redis_gripper_mode.empty() ? 'o' : redis_gripper_mode[0];
             redis_command_exchange.try_publish(command_update);
@@ -583,7 +643,8 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
         if (redis_command_exchange.try_read(command_snapshot)) {
             tau_cmd_array = command_snapshot.command_torques;
             redis_command_storage_array = command_snapshot.command_torques;
-            gripper_parameters = command_snapshot.gripper_parameters;
+            gripper_parameters =
+                arrayToVector3d(command_snapshot.gripper_parameters);
             if (!gripper_mode.empty()) {
                 gripper_mode[0] = command_snapshot.gripper_mode;
             }
@@ -669,9 +730,9 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
         state_update.wrist_ft_sensed_raw_moment = wrist_ft_sensed_raw_moment;
         state_update.tcp_sensed_force = tcp_sensed_force;
         state_update.tcp_sensed_moment = tcp_sensed_moment;
-        state_update.mass_matrix = MassMatrix;
-        state_update.gravity = gravity_vector;
-        state_update.coriolis = coriolis;
+        state_update.mass_matrix = matrix7ToArray(MassMatrix);
+        state_update.gravity = vector7ToArray(gravity_vector);
+        state_update.coriolis = vector7ToArray(coriolis);
         state_update.state_ready = true;
         robot_state_exchange.try_publish(state_update);
         // redis_client->setCommandIs(GRIPPER_CURRENT_WIDTH_KEY,
@@ -908,9 +969,9 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
         // safey keys
         _N_s.setIdentity();
         SafetyExchangeData safety_update;
-        safety_update.safety_torques = _tau_limited;
-        safety_update.sent_torques = _tau;
-        safety_update.constrained_nullspace = _N_s;
+        safety_update.safety_torques = vector7ToArray(_tau_limited);
+        safety_update.sent_torques = vector7ToArray(_tau);
+        safety_update.constrained_nullspace = matrix7ToArray(_N_s);
         safety_update.safety_ready = true;
         safety_exchange.try_publish(safety_update);
 
@@ -1233,7 +1294,7 @@ int main(int argc, char **argv) {
 
     RedisCommandData initial_command;
     initial_command.command_torques = tau_cmd_array;
-    initial_command.gripper_parameters = gripper_parameters;
+    initial_command.gripper_parameters = vector3ToArray(gripper_parameters);
     initial_command.gripper_mode = gripper_mode.empty() ? 'o' : gripper_mode[0];
     redis_command_exchange.initialize(initial_command);
     robot_state_exchange.initialize(RobotStateExchangeData{});
