@@ -23,9 +23,10 @@
 #include <spdlog/spdlog.h>
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
-#include <mutex>
 #include <string>
 #include <thread>
 
@@ -61,6 +62,8 @@ const int K_DOF = 7;
 const double FREE_DRIVE_THRESHOLD = 6; // n-m norm
 int not_touching_counter = 0;
 const int NOT_TOUCHING_WINDOW = 400; // ms
+const auto kRedisExchangePeriod = std::chrono::microseconds(1000); // 1 kHz
+const auto kGripperCommandPeriod = std::chrono::milliseconds(10); // 100 Hz
 using Vector7d = Eigen::Matrix<double, K_DOF, 1>;
 using Matrix7d = Eigen::Matrix<double, K_DOF, K_DOF>;
 
@@ -244,17 +247,99 @@ std::array<T, N> vectorToArray(const std::vector<T> &vec) {
 /** Atomic signal to stop scheduler tasks */
 std::atomic<bool> g_stop_sched = {false};
 
-struct RedisExchangeData {
-  std::array<double, K_DOF> command_torques{};
-  std::array<double, 3> gripper_parameters = {0.06, 0.1, 10.0};
+template <typename T>
+class DoubleBufferExchange {
+public:
+  DoubleBufferExchange() {
+    busy_[0].store(false, std::memory_order_relaxed);
+    busy_[1].store(false, std::memory_order_relaxed);
+  }
 
+  DoubleBufferExchange(const DoubleBufferExchange &) = delete;
+  DoubleBufferExchange &operator=(const DoubleBufferExchange &) = delete;
+
+  void initialize(const T &value) {
+    busy_[0].store(false, std::memory_order_relaxed);
+    busy_[1].store(false, std::memory_order_relaxed);
+    buffers_[0] = value;
+    buffers_[1] = value;
+    sequence_[0] = 0;
+    sequence_[1] = 0;
+    next_sequence_.store(0, std::memory_order_relaxed);
+    published_idx_.store(0, std::memory_order_release);
+  }
+
+  bool try_publish(const T &value) {
+    const int idx = 1 - published_idx_.load(std::memory_order_acquire);
+    if (!try_acquire(idx)) {
+      return false;
+    }
+
+    buffers_[idx] = value;
+    sequence_[idx] =
+        next_sequence_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    release(idx);
+    published_idx_.store(idx, std::memory_order_release);
+    return true;
+  }
+
+  bool try_read(T &value, std::uint64_t *sequence = nullptr) {
+    const int idx = published_idx_.load(std::memory_order_acquire);
+    if (!try_acquire(idx)) {
+      return false;
+    }
+
+    value = buffers_[idx];
+    if (sequence != nullptr) {
+      *sequence = sequence_[idx];
+    }
+    release(idx);
+    return true;
+  }
+
+  bool try_read_if_new(T &value, std::uint64_t &last_sequence) {
+    std::uint64_t sequence = 0;
+    if (!try_read(value, &sequence) || sequence == last_sequence) {
+      return false;
+    }
+
+    last_sequence = sequence;
+    return true;
+  }
+
+private:
+  bool try_acquire(const int idx) {
+    bool expected = false;
+    return busy_[idx].compare_exchange_strong(
+        expected, true, std::memory_order_acquire,
+        std::memory_order_relaxed);
+  }
+
+  void release(const int idx) {
+    busy_[idx].store(false, std::memory_order_release);
+  }
+
+  T buffers_[2]{};
+  std::uint64_t sequence_[2]{};
+  std::atomic<bool> busy_[2];
+  std::atomic<int> published_idx_{0};
+  std::atomic<std::uint64_t> next_sequence_{0};
+};
+
+struct TorqueCommandData {
+  std::array<double, K_DOF> command_torques{};
+};
+
+struct GripperCommandData {
+  std::array<double, 3> gripper_parameters = {0.06, 0.1, 10.0};
+};
+
+struct RobotStateExchangeData {
   std::array<double, K_DOF> joint_positions{};
   std::array<double, K_DOF> joint_velocities{};
   std::array<double, K_DOF> sensed_torques{};
   std::array<double, K_DOF> gravity{};
   std::array<double, K_DOF> coriolis{};
-  std::array<double, 1> gripper_current_width{};
-  std::array<double, 1> gripper_sensed_grasp_force{};
   std::array<double, 3> wrist_ft_sensed_raw_force{};
   std::array<double, 3> wrist_ft_sensed_raw_moment{};
   std::array<double, 3> tcp_sensed_force{};
@@ -264,8 +349,16 @@ struct RedisExchangeData {
   bool state_ready = false;
 };
 
-std::mutex redis_exchange_mutex;
-RedisExchangeData redis_exchange_data;
+struct GripperStatusData {
+  std::array<double, 1> gripper_current_width{};
+  std::array<double, 1> gripper_sensed_grasp_force{};
+  bool status_ready = false;
+};
+
+DoubleBufferExchange<TorqueCommandData> torque_command_exchange;
+DoubleBufferExchange<GripperCommandData> gripper_command_exchange;
+DoubleBufferExchange<RobotStateExchangeData> robot_state_exchange;
+DoubleBufferExchange<GripperStatusData> gripper_status_exchange;
 
 double getBlendingCoeff(const double &val, const double &low,
                         const double &high) {
@@ -360,45 +453,56 @@ void RedisManagerThread(Sai::Flexiv::CDatabaseRedisClient *redis_client,
                         std::atomic<bool> &running) {
   std::array<double, K_DOF> command_torques{};
   std::array<double, 3> redis_gripper_parameters = {0.06, 0.1, 10.0};
-  {
-    std::lock_guard<std::mutex> lock(redis_exchange_mutex);
-    command_torques = redis_exchange_data.command_torques;
-    redis_gripper_parameters = redis_exchange_data.gripper_parameters;
+  RobotStateExchangeData latest_robot_state;
+  GripperStatusData latest_gripper_status;
+  std::uint64_t robot_state_sequence = 0;
+  std::uint64_t gripper_status_sequence = 0;
+  auto next_wakeup = std::chrono::steady_clock::now();
+
+  TorqueCommandData torque_command_snapshot;
+  if (torque_command_exchange.try_read(torque_command_snapshot)) {
+    command_torques = torque_command_snapshot.command_torques;
+  }
+  GripperCommandData gripper_command_snapshot;
+  if (gripper_command_exchange.try_read(gripper_command_snapshot)) {
+    redis_gripper_parameters =
+        gripper_command_snapshot.gripper_parameters;
   }
 
   while (running.load(std::memory_order_acquire) &&
          !g_stop_sched.load(std::memory_order_acquire)) {
+    next_wakeup += kRedisExchangePeriod;
     try {
-      RedisExchangeData snapshot;
-      {
-        std::lock_guard<std::mutex> lock(redis_exchange_mutex);
-        snapshot = redis_exchange_data;
-      }
+      robot_state_exchange.try_read_if_new(latest_robot_state,
+                                           robot_state_sequence);
+      gripper_status_exchange.try_read_if_new(latest_gripper_status,
+                                              gripper_status_sequence);
 
-      command_torques = snapshot.command_torques;
-      redis_gripper_parameters = snapshot.gripper_parameters;
-
-      if (snapshot.state_ready) {
+      if (latest_robot_state.state_ready) {
         std::vector<std::array<double, K_DOF>> joint_sensor_feedback = {
-            snapshot.joint_positions, snapshot.joint_velocities,
-            snapshot.sensed_torques, snapshot.gravity, snapshot.coriolis};
+            latest_robot_state.joint_positions,
+            latest_robot_state.joint_velocities,
+            latest_robot_state.sensed_torques, latest_robot_state.gravity,
+            latest_robot_state.coriolis};
         std::vector<std::array<double, 1>> gripper_status_feedback = {
-            snapshot.gripper_current_width,
-            snapshot.gripper_sensed_grasp_force};
+            latest_gripper_status.gripper_current_width,
+            latest_gripper_status.gripper_sensed_grasp_force};
         std::vector<std::array<double, 3>> wrist_ft_sensor_feedback;
 
         if (driver_config.robot_type == Sai::Flexiv::RobotType::RIZON_4S) {
           wrist_ft_sensor_feedback.push_back(
-              snapshot.wrist_ft_sensed_raw_force);
+              latest_robot_state.wrist_ft_sensed_raw_force);
           wrist_ft_sensor_feedback.push_back(
-              snapshot.wrist_ft_sensed_raw_moment);
-          wrist_ft_sensor_feedback.push_back(snapshot.tcp_sensed_force);
-          wrist_ft_sensor_feedback.push_back(snapshot.tcp_sensed_moment);
+              latest_robot_state.wrist_ft_sensed_raw_moment);
+          wrist_ft_sensor_feedback.push_back(
+              latest_robot_state.tcp_sensed_force);
+          wrist_ft_sensor_feedback.push_back(
+              latest_robot_state.tcp_sensed_moment);
         }
 
         redis_client->setGetBatchRizon4S(
             set_get_batch_key_names, command_torques,
-            redis_gripper_parameters, snapshot.mass_matrix,
+            redis_gripper_parameters, latest_robot_state.mass_matrix,
             joint_sensor_feedback, gripper_status_feedback,
             wrist_ft_sensor_feedback);
       } else {
@@ -408,18 +512,25 @@ void RedisManagerThread(Sai::Flexiv::CDatabaseRedisClient *redis_client,
                                      redis_gripper_parameters, 3);
       }
 
-      {
-        std::lock_guard<std::mutex> lock(redis_exchange_mutex);
-        redis_exchange_data.command_torques = command_torques;
-        redis_exchange_data.gripper_parameters = redis_gripper_parameters;
-      }
+      TorqueCommandData torque_command_update;
+      torque_command_update.command_torques = command_torques;
+      torque_command_exchange.try_publish(torque_command_update);
+
+      GripperCommandData gripper_command_update;
+      gripper_command_update.gripper_parameters = redis_gripper_parameters;
+      gripper_command_exchange.try_publish(gripper_command_update);
     } catch (const std::exception &e) {
       spdlog::error(std::string("Redis manager error: ") + e.what());
       running.store(false, std::memory_order_release);
       g_stop_sched.store(true, std::memory_order_release);
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next_wakeup) {
+      std::this_thread::sleep_until(next_wakeup);
+    } else {
+      next_wakeup = now;
+    }
   }
 }
 
@@ -427,23 +538,24 @@ void RedisManagerThread(Sai::Flexiv::CDatabaseRedisClient *redis_client,
 void GripperCommandThread(flexiv::rdk::Gripper &gripper,
                           std::atomic<bool> &running) {
   Eigen::Vector3d last_command = last_gripper_parameters;
+  std::array<double, 3> command_array = gripper_parameters_array;
+  auto next_wakeup = std::chrono::steady_clock::now();
 
   while (running.load(std::memory_order_acquire) &&
          !g_stop_sched.load(std::memory_order_acquire)) {
+    next_wakeup += kGripperCommandPeriod;
     try {
-      std::array<double, 3> command_array{};
-      {
-        std::lock_guard<std::mutex> lock(redis_exchange_mutex);
-        command_array = redis_exchange_data.gripper_parameters;
+      GripperCommandData command_snapshot;
+      if (gripper_command_exchange.try_read(command_snapshot)) {
+        command_array = command_snapshot.gripper_parameters;
       }
 
       auto gripper_state = gripper.states();
-      {
-        std::lock_guard<std::mutex> lock(redis_exchange_mutex);
-        redis_exchange_data.gripper_current_width[0] = gripper_state.width;
-        redis_exchange_data.gripper_sensed_grasp_force[0] =
-            gripper_state.force;
-      }
+      GripperStatusData status_update;
+      status_update.gripper_current_width[0] = gripper_state.width;
+      status_update.gripper_sensed_grasp_force[0] = gripper_state.force;
+      status_update.status_ready = true;
+      gripper_status_exchange.try_publish(status_update);
 
       Eigen::Vector3d command =
           Eigen::Map<Eigen::Vector3d>(command_array.data());
@@ -464,7 +576,12 @@ void GripperCommandThread(flexiv::rdk::Gripper &gripper,
       g_stop_sched.store(true, std::memory_order_release);
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next_wakeup) {
+      std::this_thread::sleep_until(next_wakeup);
+    } else {
+      next_wakeup = now;
+    }
   }
 }
 
@@ -473,12 +590,11 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Model &model) {
 
   try {
 
-    {
-      std::unique_lock<std::mutex> lock(redis_exchange_mutex, std::try_to_lock);
-      if (lock.owns_lock()) {
-        tau_cmd_array = redis_exchange_data.command_torques;
-        redis_command_storage_array = redis_exchange_data.command_torques;
-      }
+    TorqueCommandData torque_command_snapshot;
+    if (torque_command_exchange.try_read(torque_command_snapshot)) {
+      tau_cmd_array = torque_command_snapshot.command_torques;
+      redis_command_storage_array =
+          torque_command_snapshot.command_torques;
     }
 
     // Monitor fault on the connected robot
@@ -548,24 +664,19 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Model &model) {
     Matrix7d MassMatrixInverse =
         MassMatrix.llt().solve(Matrix7d::Identity());
 
-    {
-      std::unique_lock<std::mutex> lock(redis_exchange_mutex, std::try_to_lock);
-      if (lock.owns_lock()) {
-        redis_exchange_data.joint_positions = q_array;
-        redis_exchange_data.joint_velocities = dq_array;
-        redis_exchange_data.sensed_torques = tau_sensed_array;
-        redis_exchange_data.gravity = gravity_vector_array;
-        redis_exchange_data.coriolis = coriolis_array;
-        redis_exchange_data.wrist_ft_sensed_raw_force =
-            wrist_ft_sensed_raw_force;
-        redis_exchange_data.wrist_ft_sensed_raw_moment =
-            wrist_ft_sensed_raw_moment;
-        redis_exchange_data.tcp_sensed_force = tcp_sensed_force;
-        redis_exchange_data.tcp_sensed_moment = tcp_sensed_moment;
-        redis_exchange_data.mass_matrix = MassMatrix;
-        redis_exchange_data.state_ready = true;
-      }
-    }
+    RobotStateExchangeData state_update;
+    state_update.joint_positions = q_array;
+    state_update.joint_velocities = dq_array;
+    state_update.sensed_torques = tau_sensed_array;
+    state_update.gravity = gravity_vector_array;
+    state_update.coriolis = coriolis_array;
+    state_update.wrist_ft_sensed_raw_force = wrist_ft_sensed_raw_force;
+    state_update.wrist_ft_sensed_raw_moment = wrist_ft_sensed_raw_moment;
+    state_update.tcp_sensed_force = tcp_sensed_force;
+    state_update.tcp_sensed_moment = tcp_sensed_moment;
+    state_update.mass_matrix = MassMatrix;
+    state_update.state_ready = true;
+    robot_state_exchange.try_publish(state_update);
 
     // reset containers
     _limited_joints.setZero(); // used to form the constraint jacobian
@@ -1087,11 +1198,17 @@ int main(int argc, char **argv) {
   }
 
   redis_client->setDoubleArray(GRIPPER_PARAMETERS_COMMANDED_KEY, gripper_parameters_array, 3);
-  {
-    std::lock_guard<std::mutex> lock(redis_exchange_mutex);
-    redis_exchange_data.command_torques = tau_cmd_array;
-    redis_exchange_data.gripper_parameters = gripper_parameters_array;
-  }
+
+  TorqueCommandData initial_torque_command;
+  initial_torque_command.command_torques = tau_cmd_array;
+  torque_command_exchange.initialize(initial_torque_command);
+
+  GripperCommandData initial_gripper_command;
+  initial_gripper_command.gripper_parameters = gripper_parameters_array;
+  gripper_command_exchange.initialize(initial_gripper_command);
+
+  robot_state_exchange.initialize(RobotStateExchangeData{});
+  gripper_status_exchange.initialize(GripperStatusData{});
 
   // prepare batch command
   set_get_batch_key_names.push_back(JOINT_TORQUES_COMMANDED_KEY);
