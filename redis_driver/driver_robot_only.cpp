@@ -24,6 +24,7 @@
 #include <atomic>
 #include <cmath>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -60,6 +61,8 @@ const int K_DOF = 7;
 const double FREE_DRIVE_THRESHOLD = 6; // n-m norm
 int not_touching_counter = 0;
 const int NOT_TOUCHING_WINDOW = 400; // ms
+using Vector7d = Eigen::Matrix<double, K_DOF, 1>;
+using Matrix7d = Eigen::Matrix<double, K_DOF, K_DOF>;
 
 // globals
 std::array<double, 7> joint_position_max_default;
@@ -101,7 +104,7 @@ enum Limit {
 };
 
 // data
-Eigen::MatrixXd MassMatrix;
+Matrix7d MassMatrix;
 std::array<double, 7> tau_cmd_array{};
 std::array<double, 7> redis_command_storage_array{};
 std::array<double, 7> q_array{};
@@ -110,12 +113,9 @@ std::array<double, 7> tau_sensed_array{};
 std::array<double, 6> wrist_ft_sensed_raw_array{};
 std::array<double, 6> external_wrench_at_tcp_array{};
 // std::array<double, 6> external_wrench_at_tcp_unfiltered_array{};
-// std::array<double, 7> gravity_vector{};
-// std::array<double, 7> coriolis{};
-// std::array<double, 49> M_array{};
-Eigen::VectorXd gravity_vector{};
-Eigen::VectorXd coriolis{};
-Eigen::MatrixXd M_array{};
+Vector7d gravity_vector = Vector7d::Zero();
+Vector7d coriolis = Vector7d::Zero();
+Matrix7d M_array;
 std::vector<std::array<double, 7>> sensor_feedback;
 std::array<double, 3> wrist_ft_sensed_raw_force{};
 std::array<double, 3> wrist_ft_sensed_raw_moment{};
@@ -145,17 +145,16 @@ bool _vel_limit_opt = true;
 // setup joint limit avoidance
 std::vector<int> _pos_limit_flag{7, SAFE};
 std::vector<int> _vel_limit_flag{7, SAFE};
-Eigen::MatrixXd
-    _J_s; // constraint task jacobian for nullspace projection (n_limited x dof)
-Eigen::MatrixXd _Lambda_s; // op-space matrix
-Eigen::MatrixXd _Jbar_s;
-Eigen::MatrixXd _N_s = Eigen::MatrixXd::Identity(
-    7, 7); // nullspace matrix with the constraint task jacobian
+Matrix7d
+    _J_s = Matrix7d::Zero(); // constraint task jacobian storage
+Matrix7d _Lambda_s = Matrix7d::Zero(); // op-space matrix storage
+Matrix7d _Jbar_s = Matrix7d::Zero();
+Matrix7d _N_s = Matrix7d::Identity(); // nullspace matrix with the constraint task jacobian
 Eigen::VectorXi
     _limited_joints(7); // 1 or 0 depending on whether the joint is limited
-Eigen::VectorXd _tau_limited = Eigen::VectorXd::Zero(7);
-Eigen::VectorXd _torque_scaling_vector =
-    Eigen::VectorXd::Ones(7); // tau scaling based on the velocity signal
+Vector7d _tau_limited = Vector7d::Zero();
+Vector7d _torque_scaling_vector =
+    Vector7d::Ones(); // tau scaling based on the velocity signal
 
 // override with new safety set (this set triggers software stop)
 double default_sf = 0.98; // max violation safety factors
@@ -167,17 +166,17 @@ double angle_tol = 1 * M_PI / 180; // rad
 double vel_tol = 0.1;              // rad/s (0.1 = 5 deg/s)
 double q_tol = 1e-1 * M_PI / 180;
 
-Eigen::VectorXd soft_min_angles(7);
-Eigen::VectorXd soft_max_angles(7);
-Eigen::VectorXd hard_min_angles(7);
-Eigen::VectorXd hard_max_angles(7);
-Eigen::VectorXd soft_min_joint_velocity_limits(7);
-Eigen::VectorXd hard_min_joint_velocity_limits(7);
-Eigen::VectorXd soft_max_joint_velocity_limits(7);
-Eigen::VectorXd hard_max_joint_velocity_limits(7);
+Vector7d soft_min_angles;
+Vector7d soft_max_angles;
+Vector7d hard_min_angles;
+Vector7d hard_max_angles;
+Vector7d soft_min_joint_velocity_limits;
+Vector7d hard_min_joint_velocity_limits;
+Vector7d soft_max_joint_velocity_limits;
+Vector7d hard_max_joint_velocity_limits;
 
 // initial torque bias
-Eigen::VectorXd init_torque_bias = Eigen::VectorXd::Zero(7);
+Vector7d init_torque_bias = Vector7d::Zero();
 int n_samples = 500;
 int n_curr = 0;
 bool initialized_torque_bias = false;
@@ -185,7 +184,7 @@ std::vector<double> kp_holding = {1000, 1000, 1000, 1000, 1000, 1000, 1000};
 std::vector<double> kv_holding = {10, 10, 10, 10, 10, 10, 10};
 std::vector<double> kp_holding_drive = {200, 200, 200, 200, 200, 200, 200};
 std::vector<double> kv_holding_drive = {10, 10, 10, 10, 10, 10, 10};
-Eigen::VectorXd q_init = Eigen::VectorXd::Zero(7);
+Vector7d q_init = Vector7d::Zero();
 bool first_loop = true;
 
 // timing
@@ -241,6 +240,35 @@ std::array<T, N> vectorToArray(const std::vector<T> &vec) {
 
 /** Atomic signal to stop scheduler tasks */
 std::atomic<bool> g_stop_sched = {false};
+
+struct RedisExchangeData {
+    std::array<double, K_DOF> command_torques{};
+    Eigen::Vector3d gripper_parameters = Eigen::Vector3d(0.06, 0.1, 10.0);
+    std::string gripper_mode = "o";
+
+    std::array<double, K_DOF> joint_positions{};
+    std::array<double, K_DOF> joint_velocities{};
+    std::array<double, K_DOF> sensed_torques{};
+    std::array<double, 3> wrist_ft_sensed_raw_force{};
+    std::array<double, 3> wrist_ft_sensed_raw_moment{};
+    std::array<double, 3> tcp_sensed_force{};
+    std::array<double, 3> tcp_sensed_moment{};
+    Matrix7d mass_matrix = Matrix7d::Zero();
+    Vector7d gravity = Vector7d::Zero();
+    Vector7d coriolis = Vector7d::Zero();
+
+    Vector7d safety_torques = Vector7d::Zero();
+    Vector7d sent_torques = Vector7d::Zero();
+    Matrix7d constrained_nullspace = Matrix7d::Identity();
+
+    std::string debug_message;
+    bool has_debug_message = false;
+    bool state_ready = false;
+    bool safety_ready = false;
+};
+
+std::mutex redis_exchange_mutex;
+RedisExchangeData redis_exchange_data;
 
 double getBlendingCoeff(const double &val, const double &low,
                         const double &high) {
@@ -308,17 +336,159 @@ void PrintHelp() {
     // clang-format on
 }
 
+void QueueRedisDebugMessage(const std::string &message) {
+    std::unique_lock<std::mutex> lock(redis_exchange_mutex, std::try_to_lock);
+    if (lock.owns_lock()) {
+        redis_exchange_data.debug_message = message;
+        redis_exchange_data.has_debug_message = true;
+    }
+}
+
+void UpdateSafetyLimits() {
+    for (int i = 0; i < K_DOF; ++i) {
+        joint_position_max[i] = default_sf * joint_position_max_default[i];
+        joint_position_min[i] = default_sf * joint_position_min_default[i];
+        joint_velocity_limits[i] =
+            default_sf * joint_velocity_limits_default[i];
+        joint_torques_limits[i] = default_sf * joint_torques_limits_default[i];
+
+        soft_min_angles(i) =
+            joint_position_min[i] + pos_zones[1] * angle_tol;
+        hard_min_angles(i) =
+            joint_position_min[i] + pos_zones[0] * angle_tol;
+        soft_max_angles(i) =
+            joint_position_max[i] - pos_zones[1] * angle_tol;
+        hard_max_angles(i) =
+            joint_position_max[i] - pos_zones[0] * angle_tol;
+        soft_min_joint_velocity_limits(i) =
+            -joint_velocity_limits[i] + vel_zones[1] * vel_tol;
+        hard_min_joint_velocity_limits(i) =
+            -joint_velocity_limits[i] + vel_zones[0] * vel_tol;
+        soft_max_joint_velocity_limits(i) =
+            joint_velocity_limits[i] - vel_zones[1] * vel_tol;
+        hard_max_joint_velocity_limits(i) =
+            joint_velocity_limits[i] - vel_zones[0] * vel_tol;
+    }
+}
+
+/** @brief Thread that owns all Redis I/O. */
+void RedisManagerThread(Sai::Flexiv::CDatabaseRedisClient *redis_client,
+                        std::atomic<bool> &running) {
+    std::array<double, K_DOF> command_torques{};
+    Eigen::Vector3d redis_gripper_parameters = Eigen::Vector3d(0.06, 0.1, 10.0);
+    std::string redis_gripper_mode = "o";
+    {
+        std::lock_guard<std::mutex> lock(redis_exchange_mutex);
+        command_torques = redis_exchange_data.command_torques;
+        redis_gripper_parameters = redis_exchange_data.gripper_parameters;
+        redis_gripper_mode = redis_exchange_data.gripper_mode;
+    }
+
+    while (running.load(std::memory_order_acquire) &&
+           !g_stop_sched.load(std::memory_order_acquire)) {
+        try {
+            RedisExchangeData snapshot;
+            {
+                std::lock_guard<std::mutex> lock(redis_exchange_mutex);
+                snapshot = redis_exchange_data;
+            }
+
+            command_torques = snapshot.command_torques;
+            redis_gripper_parameters = snapshot.gripper_parameters;
+            redis_gripper_mode = snapshot.gripper_mode;
+
+            redis_client->getDoubleArray(JOINT_TORQUES_COMMANDED_KEY,
+                                         command_torques, K_DOF);
+            redis_client->getEigenMatrixDerivedString(
+                GRIPPER_PARAMETERS_COMMANDED_KEY, redis_gripper_parameters);
+
+            std::string fetched_gripper_mode = redis_gripper_mode;
+            if (redis_client->getCommandIs(GRIPPER_MODE_KEY,
+                                           fetched_gripper_mode)) {
+                redis_gripper_mode = fetched_gripper_mode;
+            }
+
+            if (snapshot.state_ready) {
+                redis_client->setDoubleArray(JOINT_ANGLES_KEY,
+                                             snapshot.joint_positions, K_DOF);
+                redis_client->setDoubleArray(JOINT_VELOCITIES_KEY,
+                                             snapshot.joint_velocities, K_DOF);
+                redis_client->setDoubleArray(JOINT_TORQUES_SENSED_KEY,
+                                             snapshot.sensed_torques, K_DOF);
+                redis_client->setEigenMatrixDerived(MASSMATRIX_KEY,
+                                                    snapshot.mass_matrix);
+                redis_client->setEigenMatrixDerived(ROBOT_GRAVITY_KEY,
+                                                    snapshot.gravity);
+                redis_client->setEigenMatrixDerived(CORIOLIS_KEY,
+                                                    snapshot.coriolis);
+
+                if (driver_config.robot_type == Sai::Flexiv::RobotType::RIZON_4S) {
+                    redis_client->setDoubleArray(
+                        RAW_WRIST_FORCE_SENSED_KEY,
+                        snapshot.wrist_ft_sensed_raw_force, 3);
+                    redis_client->setDoubleArray(
+                        RAW_WRIST_MOMENT_SENSED_KEY,
+                        snapshot.wrist_ft_sensed_raw_moment, 3);
+                    redis_client->setDoubleArray(TCP_FORCE_SENSED_KEY,
+                                                 snapshot.tcp_sensed_force, 3);
+                    redis_client->setDoubleArray(TCP_MOMENT_SENSED_KEY,
+                                                 snapshot.tcp_sensed_moment, 3);
+                }
+            }
+
+            if (snapshot.safety_ready) {
+                redis_client->setEigenMatrixDerived(SAFETY_TORQUES_LOGGING_KEY,
+                                                    snapshot.safety_torques);
+                redis_client->setEigenMatrixDerived(SENT_TORQUES_LOGGING_KEY,
+                                                    snapshot.sent_torques);
+                redis_client->setEigenMatrixDerived(CONSTRAINED_NULLSPACE_KEY,
+                                                    snapshot.constrained_nullspace);
+            }
+
+            if (snapshot.has_debug_message) {
+                redis_client->setCommandIs(SAI_DEBUG_KEY,
+                                           snapshot.debug_message);
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(redis_exchange_mutex);
+                redis_exchange_data.command_torques = command_torques;
+                redis_exchange_data.gripper_parameters =
+                    redis_gripper_parameters;
+                redis_exchange_data.gripper_mode = redis_gripper_mode;
+
+                if (snapshot.has_debug_message &&
+                    redis_exchange_data.has_debug_message &&
+                    redis_exchange_data.debug_message ==
+                        snapshot.debug_message) {
+                    redis_exchange_data.has_debug_message = false;
+                }
+            }
+        } catch (const std::exception &e) {
+            spdlog::error(std::string("Redis manager error: ") + e.what());
+            running.store(false, std::memory_order_release);
+            g_stop_sched.store(true, std::memory_order_release);
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
 /** @brief Callback function for realtime periodic task */
 void PeriodicTask(flexiv::rdk::Robot &robot,
-                  flexiv::rdk::Model &model,
-                  Sai::Flexiv::CDatabaseRedisClient *redis_client) {
+                  flexiv::rdk::Model &model) {
 
     try {
 
-        redis_client->getEigenMatrixDerivedString(
-            GRIPPER_PARAMETERS_COMMANDED_KEY, gripper_parameters);
-
-        redis_client->getCommandIs(GRIPPER_MODE_KEY, gripper_mode);
+        {
+            std::unique_lock<std::mutex> lock(redis_exchange_mutex, std::try_to_lock);
+            if (lock.owns_lock()) {
+                tau_cmd_array = redis_exchange_data.command_torques;
+                redis_command_storage_array = redis_exchange_data.command_torques;
+                gripper_parameters = redis_exchange_data.gripper_parameters;
+                gripper_mode = redis_exchange_data.gripper_mode;
+            }
+        }
 
         // if ((gripper_parameters - last_gripper_parameters).norm() > 0.001) {
         //     gripper_width = gripper_parameters(0);
@@ -344,42 +514,6 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
         //     }
         //     last_gripper_mode = gripper_mode;
         // }
-
-        for (int i = 0; i < 7; ++i) {
-            joint_position_max[i] = default_sf * joint_position_max_default[i];
-            joint_position_min[i] = default_sf * joint_position_min_default[i];
-            joint_velocity_limits[i] =
-                default_sf * joint_velocity_limits_default[i];
-            joint_torques_limits[i] =
-                default_sf * joint_torques_limits_default[i];
-        }
-
-        for (int i = 0; i < 7; ++i) {
-            soft_min_angles(i) =
-                joint_position_min[i] + pos_zones[1] * angle_tol;
-            hard_min_angles(i) =
-                joint_position_min[i] + pos_zones[0] * angle_tol;
-            soft_max_angles(i) =
-                joint_position_max[i] - pos_zones[1] * angle_tol;
-            hard_max_angles(i) =
-                joint_position_max[i] - pos_zones[0] * angle_tol;
-            soft_min_joint_velocity_limits(i) =
-                -joint_velocity_limits[i] + vel_zones[1] * vel_tol;
-            hard_min_joint_velocity_limits(i) =
-                -joint_velocity_limits[i] + vel_zones[0] * vel_tol;
-            soft_max_joint_velocity_limits(i) =
-                joint_velocity_limits[i] - vel_zones[1] * vel_tol;
-            hard_max_joint_velocity_limits(i) =
-                joint_velocity_limits[i] - vel_zones[0] * vel_tol;
-
-            // // specific joint offsets
-            // if (i == 6) {
-            //     soft_min_joint_velocity_limits(i) += 4.5 * vel_tol;
-            //     hard_min_joint_velocity_limits(i) += 4.5 * vel_tol;
-            //     soft_max_joint_velocity_limits(i) -= 4.5 * vel_tol;
-            //     hard_max_joint_velocity_limits(i) -= 4.5 * vel_tol;
-            // }
-        }
 
         // Monitor fault on the connected robot
         if (robot.fault()) {
@@ -409,14 +543,10 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
         Eigen::Map<Eigen::Matrix<double, 7, 1>> _tau(tau_cmd_array.data());
         Eigen::Map<Eigen::Matrix<double, 7, 1>> _sensed_torques(
             sensor_feedback[2].data()); // sensed torques
-        Eigen::Map<Eigen::Matrix<double, 7, 1>> _coriolis(
-            sensor_feedback[4].data());
-        Eigen::MatrixXd MassMatrixInverse =
-            MassMatrix.llt().solve(Eigen::MatrixXd::Identity(7, 7));
+        Eigen::Map<Eigen::Matrix<double, 7, 1>> _coriolis(coriolis.data());
+        Matrix7d MassMatrixInverse =
+            MassMatrix.llt().solve(Matrix7d::Identity());
 
-        redis_client->setGetBatchCommands(key_names, tau_cmd_array, MassMatrix,
-                                          sensor_feedback);
-        redis_command_storage_array = tau_cmd_array;
         if (driver_config.robot_type == Sai::Flexiv::RobotType::RIZON_4S) {
             wrist_ft_sensed_raw_force = {wrist_ft_sensed_raw_array[0],
                                          wrist_ft_sensed_raw_array[1],
@@ -430,17 +560,26 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
             tcp_sensed_moment = {external_wrench_at_tcp_array[3],
                                  external_wrench_at_tcp_array[4],
                                  external_wrench_at_tcp_array[5]};
-            redis_client->setDoubleArray(RAW_WRIST_FORCE_SENSED_KEY,
-                                         wrist_ft_sensed_raw_force, 3);
-            redis_client->setDoubleArray(RAW_WRIST_MOMENT_SENSED_KEY,
-                                         wrist_ft_sensed_raw_moment, 3);
-            redis_client->setDoubleArray(TCP_FORCE_SENSED_KEY, tcp_sensed_force,
-                                         3);
-            redis_client->setDoubleArray(TCP_MOMENT_SENSED_KEY,
-                                         tcp_sensed_moment, 3);
         }
-        redis_client->setEigenMatrixDerived(ROBOT_GRAVITY_KEY, gravity_vector);
-        redis_client->setEigenMatrixDerived(CORIOLIS_KEY, coriolis);
+
+        {
+            std::unique_lock<std::mutex> lock(redis_exchange_mutex, std::try_to_lock);
+            if (lock.owns_lock()) {
+                redis_exchange_data.joint_positions = sensor_feedback[0];
+                redis_exchange_data.joint_velocities = sensor_feedback[1];
+                redis_exchange_data.sensed_torques = sensor_feedback[2];
+                redis_exchange_data.wrist_ft_sensed_raw_force =
+                    wrist_ft_sensed_raw_force;
+                redis_exchange_data.wrist_ft_sensed_raw_moment =
+                    wrist_ft_sensed_raw_moment;
+                redis_exchange_data.tcp_sensed_force = tcp_sensed_force;
+                redis_exchange_data.tcp_sensed_moment = tcp_sensed_moment;
+                redis_exchange_data.mass_matrix = MassMatrix;
+                redis_exchange_data.gravity = gravity_vector;
+                redis_exchange_data.coriolis = coriolis;
+                redis_exchange_data.state_ready = true;
+            }
+        }
         // redis_client->setCommandIs(GRIPPER_CURRENT_WIDTH_KEY,
         //                            std::to_string(gripper_current_width[0]));
         // redis_client->setCommandIs(
@@ -529,8 +668,8 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
         }
 
         int n_limited_joints = _limited_joints.sum();
-        _tau_limited = Eigen::VectorXd::Zero(7);
-        _torque_scaling_vector = Eigen::VectorXd::Ones(7);
+        _tau_limited = Vector7d::Zero();
+        _torque_scaling_vector = Vector7d::Ones();
 
         if (n_limited_joints > 0) {
             for (int i = 0; i < 7; ++i) {
@@ -650,7 +789,7 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
             }
 
             // compute revised torques
-            _J_s = Eigen::MatrixXd::Zero(n_limited_joints, 7);
+            _J_s.setZero();
             int cnt = 0;
             for (int i = 0; i < 7; ++i) {
                 if (_limited_joints(i)) {
@@ -658,9 +797,13 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
                     cnt++;
                 }
             }
-            _Lambda_s = (_J_s * MassMatrixInverse * _J_s.transpose()).inverse();
+            _Lambda_s.setZero();
+            _Lambda_s.topLeftCorner(n_limited_joints, n_limited_joints) =
+                (_J_s.topRows(n_limited_joints) * MassMatrixInverse *
+                 _J_s.topRows(n_limited_joints).transpose())
+                    .inverse();
             _Jbar_s = MassMatrixInverse * _J_s.transpose() * _Lambda_s;
-            _N_s = Eigen::MatrixXd::Identity(7, 7) - _Jbar_s * _J_s;
+            _N_s = Matrix7d::Identity() - _Jbar_s * _J_s;
             _tau = _tau_limited + _N_s.transpose() * _tau;
 
             for (int i = 0; i < 7; ++i) {
@@ -670,10 +813,15 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
 
         // safey keys
         _N_s.setIdentity();
-        redis_client->setEigenMatrixDerived(SAFETY_TORQUES_LOGGING_KEY,
-                                            _tau_limited);
-        redis_client->setEigenMatrixDerived(SENT_TORQUES_LOGGING_KEY, _tau);
-        redis_client->setEigenMatrixDerived(CONSTRAINED_NULLSPACE_KEY, _N_s);
+        {
+            std::unique_lock<std::mutex> lock(redis_exchange_mutex, std::try_to_lock);
+            if (lock.owns_lock()) {
+                redis_exchange_data.safety_torques = _tau_limited;
+                redis_exchange_data.sent_torques = _tau;
+                redis_exchange_data.constrained_nullspace = _N_s;
+                redis_exchange_data.safety_ready = true;
+            }
+        }
 
         // safety checks
         // joint torques, velocity and positions
@@ -817,8 +965,8 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
                 FREE_DRIVE_THRESHOLD) {
                 not_touching_counter = 0;
 
-                redis_client->setCommandIs(
-                    SAI_DEBUG_KEY, "From Driver - Robot Touch Detected - Floating");
+                QueueRedisDebugMessage(
+                    "From Driver - Robot Touch Detected - Floating");
                 // active drive
                 for (int i = 0; i < 7; ++i) {
                     q_init(i) = robot_state.q[i];
@@ -830,8 +978,7 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
 
                 if (not_touching_counter > NOT_TOUCHING_WINDOW) {
                     // position hold if not touching
-                    redis_client->setCommandIs(
-                        SAI_DEBUG_KEY,
+                    QueueRedisDebugMessage(
                         "From Driver - No Touch Detected, Holding");
                     for (int i = 0; i < 7; ++i) {
                         target_torque[i] =
@@ -850,12 +997,11 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
             }
 
             // multiply by mass matrix
-            Eigen::VectorXd holding_torques = Eigen::VectorXd::Zero(7);
+            Vector7d holding_torques = Vector7d::Zero();
             for (int i = 0; i < 7; ++i) {
                 holding_torques(i) = target_torque[i];
             }
-            Eigen::VectorXd decoupled_holding_torques =
-                MassMatrix * holding_torques;
+            Vector7d decoupled_holding_torques = MassMatrix * holding_torques;
             for (int i = 0; i < 7; ++i) {
                 target_torque[i] = decoupled_holding_torques(i);
             }
@@ -868,7 +1014,7 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
 
         // Add some velocity damping
         for (size_t i = 0; i < K_DOF; ++i) {
-            target_torque[i] += -kFloatingDamping[i] * robot.states().dtheta[i];
+            target_torque[i] += -kFloatingDamping[i] * robot_state.dtheta[i];
             // std::cout << target_torque[i] << "\n";
         }
 
@@ -993,6 +1139,12 @@ int main(int argc, char **argv) {
     redis_client->setEigenMatrixDerivedString(GRIPPER_PARAMETERS_COMMANDED_KEY,
                                               gripper_parameters);
     redis_client->setCommandIs(GRIPPER_MODE_KEY, "o");
+    {
+        std::lock_guard<std::mutex> lock(redis_exchange_mutex);
+        redis_exchange_data.command_torques = tau_cmd_array;
+        redis_exchange_data.gripper_parameters = gripper_parameters;
+        redis_exchange_data.gripper_mode = gripper_mode;
+    }
 
     // prepare batch command
     key_names.push_back(JOINT_TORQUES_COMMANDED_KEY);
@@ -1048,6 +1200,10 @@ int main(int argc, char **argv) {
                   << "\n";
         return -1;
     }
+    UpdateSafetyLimits();
+
+    std::atomic<bool> redis_thread_running{false};
+    std::thread redis_thread;
 
     try {
 
@@ -1135,10 +1291,12 @@ int main(int argc, char **argv) {
 
         // Create real-time scheduler to run periodic tasks
         flexiv::rdk::Scheduler scheduler;
+        redis_thread_running.store(true, std::memory_order_release);
+        redis_thread = std::thread(RedisManagerThread, redis_client,
+                                   std::ref(redis_thread_running));
         // Add periodic task with 1ms interval and highest applicable
         // priority
-        scheduler.AddTask(std::bind(PeriodicTask, std::ref(robot), std::ref(model),
-                                    std::ref(redis_client)),
+        scheduler.AddTask(std::bind(PeriodicTask, std::ref(robot), std::ref(model)),
                           "HP periodic", 1, driver_config.process_priority,
                           driver_config.cpu_affinity);
         // Start all added tasks
@@ -1150,8 +1308,16 @@ int main(int argc, char **argv) {
         }
         // Received signal to stop scheduler tasks
         scheduler.Stop();
+        redis_thread_running.store(false, std::memory_order_release);
+        if (redis_thread.joinable()) {
+            redis_thread.join();
+        }
 
     } catch (const std::exception &e) {
+        redis_thread_running.store(false, std::memory_order_release);
+        if (redis_thread.joinable()) {
+            redis_thread.join();
+        }
         spdlog::error(e.what());
         return 1;
     }
