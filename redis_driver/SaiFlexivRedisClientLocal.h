@@ -66,6 +66,13 @@ public:
 	void keyExpiryIs(const string& key, const uint expiry_ms) {
 		reply_ = (redisReply *)redisCommand(context_, "PEXPIRE %s %s", key.c_str(), std::to_string(expiry_ms).c_str());
 		// NOTE: write commands dont check for write errors.
+		if (NULL == reply_) {
+			throw(runtime_error("Server error in setting key expiry!"));
+		}
+		if (REDIS_REPLY_ERROR == reply_->type) {
+			freeReplyObject((void*)reply_);
+			throw(runtime_error("Redis error in setting key expiry!"));
+		}
 		freeReplyObject((void*)reply_);
 	}
 
@@ -81,6 +88,10 @@ public:
 		if (REDIS_REPLY_NIL == reply_->type) {
 			// cout << "\nNo data on server.. Missing key?";
 			return false;
+		}
+		if (REDIS_REPLY_STRING != reply_->type) {
+			freeReplyObject((void*)reply_);
+			throw(runtime_error("Unexpected Redis reply type in fetching data!"));
 		}
 		return true;
 	}
@@ -134,6 +145,13 @@ public:
 	void setCommandIs(const string &cmd_mssg, const string &data_mssg) {
 		reply_ = (redisReply *)redisCommand(context_, "SET %s %s", cmd_mssg.c_str(), data_mssg.c_str());
 		// NOTE: set commands dont check for write errors.
+		if (NULL == reply_) {
+			throw(runtime_error("Server error in setting data!"));
+		}
+		if (REDIS_REPLY_ERROR == reply_->type) {
+			freeReplyObject((void*)reply_);
+			throw(runtime_error("Redis error in setting data!"));
+		}
       	freeReplyObject((void*)reply_);
 	}
 
@@ -153,7 +171,9 @@ public:
 		{
 			hDoubleArraytoStringArrayJSON(data_mssg_vec[i], 7, data_mssg_indiv);
 			// batch_mssg += "SET " + cmd_mssg_vec[i] + " " + data_mssg_indiv + "\r\n";
-			redisAppendCommand(context_,"SET %s %s", cmd_mssg_vec[i].c_str(), data_mssg_indiv.c_str());
+			if (redisAppendCommand(context_,"SET %s %s", cmd_mssg_vec[i].c_str(), data_mssg_indiv.c_str()) != REDIS_OK) {
+				throw(runtime_error("Redis append command failed in setCommandBatch!"));
+			}
 			++cmd;
 		}
 	    /* Read (and ignore) the replies */
@@ -190,23 +210,31 @@ public:
 
 		// add get command for commanded joint torques from controller
 		int cmd = 0;
-		redisAppendCommand(context_,"GET %s", cmd_mssg_vec[0].c_str());
+		if (redisAppendCommand(context_,"GET %s", cmd_mssg_vec[0].c_str()) != REDIS_OK) {
+			throw(runtime_error("Redis append command failed for joint torques!"));
+		}
 		++cmd;
 
 		// add get command for commanded gripper parameters from controller
-		redisAppendCommand(context_,"GET %s", cmd_mssg_vec[1].c_str());
+		if (redisAppendCommand(context_,"GET %s", cmd_mssg_vec[1].c_str()) != REDIS_OK) {
+			throw(runtime_error("Redis append command failed for gripper parameters!"));
+		}
 		++cmd;
 
 		// create set commands for robot-provided mass matrix
 		hEigentoStringArrayJSON(set_data_mssg_massmatrix, data_mssg_indiv);
-		redisAppendCommand(context_,"SET %s %s", cmd_mssg_vec[2].c_str(), data_mssg_indiv.c_str());
+		if (redisAppendCommand(context_,"SET %s %s", cmd_mssg_vec[2].c_str(), data_mssg_indiv.c_str()) != REDIS_OK) {
+			throw(runtime_error("Redis append command failed for mass matrix!"));
+		}
 		++cmd;
 
 		// create set commands for joint data from robot
 		for(int i=0; i < num_joint_data_msgs; i++)
 		{
 			hDoubleArraytoStringArrayJSON(set_joint_data_mssg_vec[i], 7, data_mssg_indiv);
-			redisAppendCommand(context_,"SET %s %s", cmd_mssg_vec[i+3].c_str(), data_mssg_indiv.c_str());
+			if (redisAppendCommand(context_,"SET %s %s", cmd_mssg_vec[i+3].c_str(), data_mssg_indiv.c_str()) != REDIS_OK) {
+				throw(runtime_error("Redis append command failed for joint data!"));
+			}
 			++cmd;
 		}
 		
@@ -214,7 +242,9 @@ public:
 		for(int i=0; i < num_gripper_status_msgs; i++)
 		{
 			hDoubleArraytoStringArrayJSON(set_gripper_status_mssg_vec[i], 1, data_mssg_indiv);
-			redisAppendCommand(context_,"SET %s %s", cmd_mssg_vec[i+3+num_joint_data_msgs].c_str(), data_mssg_indiv.c_str());
+			if (redisAppendCommand(context_,"SET %s %s", cmd_mssg_vec[i+3+num_joint_data_msgs].c_str(), data_mssg_indiv.c_str()) != REDIS_OK) {
+				throw(runtime_error("Redis append command failed for gripper status!"));
+			}
 			++cmd;
 		}
 
@@ -222,7 +252,9 @@ public:
 		for(int i=0; i < num_wrist_data_msgs; i++)
 		{
 			hDoubleArraytoStringArrayJSON(set_wrist_data_mssg_vec[i], 3, data_mssg_indiv);
-			redisAppendCommand(context_,"SET %s %s", cmd_mssg_vec[i+3+num_joint_data_msgs+num_gripper_status_msgs].c_str(), data_mssg_indiv.c_str());
+			if (redisAppendCommand(context_,"SET %s %s", cmd_mssg_vec[i+3+num_joint_data_msgs+num_gripper_status_msgs].c_str(), data_mssg_indiv.c_str()) != REDIS_OK) {
+				throw(runtime_error("Redis append command failed for wrist data!"));
+			}
 			++cmd;
 		}
 
@@ -295,10 +327,12 @@ public:
 	void getEigenMatrixDerived(const string &cmd_mssg, Eigen::MatrixBase<Derived> &ret_mat) {
 		auto success = getCommandIs(cmd_mssg);
 		// deserialize
-		if(success && !hEigenFromStringArrayJSON(ret_mat, reply_->str)) {
+		const bool parse_success =
+			!success || hEigenFromStringArrayJSON(ret_mat, reply_->str);
+		freeReplyObject((void*)reply_);
+		if(!parse_success) {
 			throw(runtime_error("Could not deserialize json to eigen data!"));
 		}
-		freeReplyObject((void*)reply_);	
 	}
 
 	// read raw eigen vector, but from a custom string rather than from json
@@ -306,10 +340,12 @@ public:
 	void getEigenMatrixDerivedString(const string &cmd_mssg, Eigen::MatrixBase<Derived> &ret_mat) {
 		auto success = getCommandIs(cmd_mssg);
 		// deserialize
-		if(success && !hEigenFromStringArrayCustom(ret_mat, reply_->str)) {
+		const bool parse_success =
+			!success || hEigenFromStringArrayCustom(ret_mat, reply_->str);
+		freeReplyObject((void*)reply_);
+		if(!parse_success) {
 			throw(runtime_error("Could not deserialize custom string to eigen data!"));
 		}
-		freeReplyObject((void*)reply_);	
 	}
 
 	// write raw double array of length n
@@ -327,10 +363,12 @@ public:
 	void getDoubleArray(const string &cmd_mssg, double (&ret_array)[n], const int &array_length) {
 		auto success = getCommandIs(cmd_mssg);
 		// deserialize
-		if(success && !hDoubleArrayFromStringArrayJSON(ret_array, array_length, reply_->str)) {
+		const bool parse_success =
+			!success || hDoubleArrayFromStringArrayJSON(ret_array, array_length, reply_->str);
+		freeReplyObject((void*)reply_);
+		if(!parse_success) {
 			throw(runtime_error("Could not deserialize json to double array data!"));
 		}
-		freeReplyObject((void*)reply_);	
 	}
 
 	// write raw double array of length n
@@ -348,16 +386,25 @@ public:
 	void getDoubleArray(const string &cmd_mssg, std::array<double, n> &ret_array, const int &array_length) {
 		auto success = getCommandIs(cmd_mssg);
 		// deserialize
-		if(success && !hDoubleArrayFromStringArrayJSON(ret_array, array_length, reply_->str)) {
+		const bool parse_success =
+			!success || hDoubleArrayFromStringArrayJSON(ret_array, array_length, reply_->str);
+		freeReplyObject((void*)reply_);
+		if(!parse_success) {
 			throw(runtime_error("Could not deserialize json to double array data!"));
 		}
-		freeReplyObject((void*)reply_);	
 	}
 
 public: // server connectivity tools
 	void ping() {
 		// PING server to make sure things are working..
         reply_ = (redisReply *)redisCommand(context_,"PING");
+        if (NULL == reply_) {
+            throw(runtime_error("Server error in ping!"));
+        }
+        if (REDIS_REPLY_ERROR == reply_->type) {
+            freeReplyObject((void*)reply_);
+            throw(runtime_error("Redis error in ping!"));
+        }
         cout<<"\n\nDriver Redis Task : Pinged Redis server. Reply is, "<<reply_->str<<"\n";
         freeReplyObject((void*)reply_);
 	}

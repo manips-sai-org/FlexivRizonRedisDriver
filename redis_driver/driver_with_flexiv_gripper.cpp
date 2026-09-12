@@ -477,6 +477,12 @@ void RedisManagerThread(Sai::Flexiv::CDatabaseRedisClient *redis_client,
   GripperStatusData latest_gripper_status;
   std::uint64_t robot_state_sequence = 0;
   std::uint64_t gripper_status_sequence = 0;
+  std::vector<std::array<double, K_DOF>> joint_sensor_feedback(5);
+  std::vector<std::array<double, 1>> gripper_status_feedback(2);
+  std::vector<std::array<double, 3>> wrist_ft_sensor_feedback;
+  if (driver_config.robot_type == Sai::Flexiv::RobotType::RIZON_4S) {
+    wrist_ft_sensor_feedback.resize(4);
+  }
   auto next_wakeup = std::chrono::steady_clock::now();
 
   TorqueCommandData torque_command_snapshot;
@@ -501,25 +507,23 @@ void RedisManagerThread(Sai::Flexiv::CDatabaseRedisClient *redis_client,
       if (latest_robot_state.state_ready) {
         const Matrix7d latest_mass_matrix =
             arrayToMatrix7d(latest_robot_state.mass_matrix);
-        std::vector<std::array<double, K_DOF>> joint_sensor_feedback = {
-            latest_robot_state.joint_positions,
-            latest_robot_state.joint_velocities,
-            latest_robot_state.sensed_torques, latest_robot_state.gravity,
-            latest_robot_state.coriolis};
-        std::vector<std::array<double, 1>> gripper_status_feedback = {
-            latest_gripper_status.gripper_current_width,
-            latest_gripper_status.gripper_sensed_grasp_force};
-        std::vector<std::array<double, 3>> wrist_ft_sensor_feedback;
+        joint_sensor_feedback[0] = latest_robot_state.joint_positions;
+        joint_sensor_feedback[1] = latest_robot_state.joint_velocities;
+        joint_sensor_feedback[2] = latest_robot_state.sensed_torques;
+        joint_sensor_feedback[3] = latest_robot_state.gravity;
+        joint_sensor_feedback[4] = latest_robot_state.coriolis;
+        gripper_status_feedback[0] =
+            latest_gripper_status.gripper_current_width;
+        gripper_status_feedback[1] =
+            latest_gripper_status.gripper_sensed_grasp_force;
 
         if (driver_config.robot_type == Sai::Flexiv::RobotType::RIZON_4S) {
-          wrist_ft_sensor_feedback.push_back(
-              latest_robot_state.wrist_ft_sensed_raw_force);
-          wrist_ft_sensor_feedback.push_back(
-              latest_robot_state.wrist_ft_sensed_raw_moment);
-          wrist_ft_sensor_feedback.push_back(
-              latest_robot_state.tcp_sensed_force);
-          wrist_ft_sensor_feedback.push_back(
-              latest_robot_state.tcp_sensed_moment);
+          wrist_ft_sensor_feedback[0] =
+              latest_robot_state.wrist_ft_sensed_raw_force;
+          wrist_ft_sensor_feedback[1] =
+              latest_robot_state.wrist_ft_sensed_raw_moment;
+          wrist_ft_sensor_feedback[2] = latest_robot_state.tcp_sensed_force;
+          wrist_ft_sensor_feedback[3] = latest_robot_state.tcp_sensed_moment;
         }
 
         redis_client->setGetBatchRizon4S(
