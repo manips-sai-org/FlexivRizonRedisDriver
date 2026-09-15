@@ -775,37 +775,66 @@ bool CDatabaseRedisClient::hEigenFromStringArrayJSON(Eigen::MatrixBase<Derived>&
 template<long unsigned int n>
 bool CDatabaseRedisClient::hDoubleArrayFromStringArrayJSON(std::array<double, n> &x, const int& array_length, const std::string &arg_str)
 {
-	Json::Value jval;
-	Json::Reader json_reader;
-	if(!json_reader.parse(arg_str,jval))
-		{ return false; }
-
-	if(!jval.isArray()) return false; //Must be an array..
-	unsigned int nrows = jval.size();
-	if(nrows < 1) return false; //Must have elements.
-
-	bool is_matrix = jval[0].isArray();
-	if(!is_matrix)
+	if(array_length < 0 || static_cast<size_t>(array_length) > n)
 	{
-		if(array_length < 0 || static_cast<size_t>(array_length) > n ||
-		   nrows != static_cast<unsigned int>(array_length))
-		{
-			std::cout << "WARNING : JSON array size inconsistent with double array size\n";
-			return false;
-		}
-		for(int i=0; i<array_length; ++i)
-		{
-			if(!jval[i].isNumeric()) return false;
-			const double value = jval[i].asDouble();
-			if(!std::isfinite(value)) return false;
-			x[i] = value;
-		}
-	}
-	else
-	{
-		std::cout << "WARNING : Trying to read a JSON Matrix to a double array\n";
+		std::cout << "WARNING : Requested double array size is outside storage bounds\n";
 		return false;
 	}
+
+	Json::Value jval;
+	Json::Reader json_reader;
+	if(json_reader.parse(arg_str,jval) && jval.isArray())
+	{
+		unsigned int nrows = jval.size();
+		if(nrows < 1) return false; //Must have elements.
+
+		bool is_matrix = jval[0].isArray();
+		if(!is_matrix)
+		{
+			if(nrows != static_cast<unsigned int>(array_length))
+			{
+				std::cout << "WARNING : JSON array size inconsistent with double array size\n";
+				return false;
+			}
+			for(int i=0; i<array_length; ++i)
+			{
+				if(!jval[i].isNumeric()) return false;
+				const double value = jval[i].asDouble();
+				if(!std::isfinite(value)) return false;
+				x[i] = value;
+			}
+			return true;
+		}
+		else
+		{
+			std::cout << "WARNING : Trying to read a JSON Matrix to a double array\n";
+			return false;
+		}
+	}
+
+	std::string custom_str = arg_str;
+	std::replace(custom_str.begin(), custom_str.end(), ',', ' ');
+	std::replace(custom_str.begin(), custom_str.end(), ';', ' ');
+	std::replace(custom_str.begin(), custom_str.end(), '[', ' ');
+	std::replace(custom_str.begin(), custom_str.end(), ']', ' ');
+
+	std::stringstream ss(custom_str);
+	for(int i=0; i<array_length; ++i)
+	{
+		if(!(ss >> x[i]) || !std::isfinite(x[i]))
+		{
+			std::cout << "WARNING : Could not parse double array string\n";
+			return false;
+		}
+	}
+
+	std::string extra_value;
+	if(ss >> extra_value)
+	{
+		std::cout << "WARNING : Double array string has extra values\n";
+		return false;
+	}
+
 	return true;
 }
 

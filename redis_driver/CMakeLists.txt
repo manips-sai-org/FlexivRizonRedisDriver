@@ -9,7 +9,7 @@ set(CMAKE_BUILD_TYPE Release)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(CMAKE_PREFIX_PATH="~/rdk_install_flexiv")
+set(CMAKE_PREFIX_PATH "$ENV{HOME}/rdk_install")
 # Create a library
 add_executable(${PROJECT_NAME}_robot_only driver_robot_only.cpp)
 add_executable(${PROJECT_NAME}_with_gripper driver_with_flexiv_gripper.cpp)

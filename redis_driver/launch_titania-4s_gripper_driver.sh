@@ -1,3 +1,6 @@
+RDK_INSTALL_DIR="/home/src2/rdk_install"
+export LD_LIBRARY_PATH="$RDK_INSTALL_DIR/lib:${LD_LIBRARY_PATH:-}"
+
 sudo cpufreq-set -c 1 -g performance
 sudo cpupower -c 1 frequency-set -d 4200MHz 
 sudo cpufreq-set -c 2 -g performance
@@ -12,5 +15,5 @@ sudo cpufreq-set -c 6 -g performance
 sudo cpupower -c 6 frequency-set -d 4200MHz 
 sudo cpufreq-set -c 7 -g performance
 sudo cpupower -c 7 frequency-set -d 4200MHz 
-sudo taskset --cpu-list 7 chrt -rr 79 ./build/flexiv_rizon4_redis_driver_with_gripper config_titania.xml
+sudo env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" taskset --cpu-list 7 chrt -rr 79 ./build/flexiv_rizon4_redis_driver_with_gripper config_titania.xml
 # ./build/flexiv_rizon4_redis_driver_with_gripper config_oberon.xml
