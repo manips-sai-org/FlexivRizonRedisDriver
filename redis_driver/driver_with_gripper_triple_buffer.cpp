@@ -24,6 +24,7 @@
 #include <atomic>
 #include <cmath>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <thread>
 
@@ -746,6 +747,18 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
 
         // safety checks
         // joint torques, velocity and positions
+        std::string safety_violation_reason;
+        auto record_safety_violation = [&](int joint, const char *description,
+                                           double value, double limit) {
+            if (!safety_violation_reason.empty()) {
+                return;
+            }
+            std::ostringstream msg;
+            msg << description << " on joint " << joint << " (value " << value
+                << ", limit " << limit << ")";
+            safety_violation_reason = msg.str();
+        };
+
         for (int i = 0; i < 7; ++i) {
             // torque saturation
             if (tau_cmd_array[i] > joint_torques_limits[i]) {
@@ -766,6 +779,9 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
             // position limit
             if (robot_state.q[i] > joint_position_max[i]) {
                 safety_mode_flag = true;
+                record_safety_violation(i, "upper position limit violation",
+                                        robot_state.q[i],
+                                        joint_position_max[i]);
                 if (safety_controller_count == 200) {
                     std::cout
                         << "WARNING : Soft joint upper limit violated on joint "
@@ -774,6 +790,9 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
             }
             if (robot_state.q[i] < joint_position_min[i]) {
                 safety_mode_flag = true;
+                record_safety_violation(i, "lower position limit violation",
+                                        robot_state.q[i],
+                                        joint_position_min[i]);
                 if (safety_controller_count == 200) {
                     std::cout
                         << "WARNING : Soft joint lower limit violated on joint "
@@ -783,6 +802,9 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
             // velocity limit
             if (abs(robot_state.dq[i]) > joint_velocity_limits[i]) {
                 safety_mode_flag = true;
+                record_safety_violation(i, "velocity limit violation",
+                                        std::abs(robot_state.dq[i]),
+                                        joint_velocity_limits[i]);
                 if (safety_controller_count == 200) {
                     std::cout
                         << "WARNING : Soft velocity limit violated on joint "
@@ -832,8 +854,12 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
             }
 
             if (safety_controller_count == 0) {
-                throw std::runtime_error(
-                    "Stopping driver due to safety violation");
+                std::string error =
+                    "Stopping driver due to safety violation";
+                if (!safety_violation_reason.empty()) {
+                    error += ": " + safety_violation_reason;
+                }
+                throw std::runtime_error(error);
             }
             safety_controller_count--;
         }
@@ -947,9 +973,8 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
 
         counter++;
     } catch (const std::exception &e) {
-        std::cout << "Error \n"
-                  << "\n";
-        spdlog::error(e.what());
+        std::cout << "PeriodicTask error: " << e.what() << "\n";
+        spdlog::error("PeriodicTask error: {}", e.what());
         g_stop_sched = true;
     }
 }
@@ -1221,7 +1246,8 @@ int main(int argc, char **argv) {
         scheduler.Stop();
 
     } catch (const std::exception &e) {
-        spdlog::error(e.what());
+        std::cerr << "Driver error: " << e.what() << "\n";
+        spdlog::error("Driver error: {}", e.what());
         return 1;
     }
 

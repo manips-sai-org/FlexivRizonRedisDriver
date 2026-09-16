@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <thread>
 
@@ -546,7 +547,8 @@ void RedisManagerThread(Sai::Flexiv::CDatabaseRedisClient *redis_client,
       gripper_command_update.gripper_parameters = redis_gripper_parameters;
       gripper_command_exchange.try_publish(gripper_command_update);
     } catch (const std::exception &e) {
-      spdlog::error(std::string("Redis manager error: ") + e.what());
+      std::cerr << "Redis manager error: " << e.what() << "\n";
+      spdlog::error("Redis manager error: {}", e.what());
       running.store(false, std::memory_order_release);
       g_stop_sched.store(true, std::memory_order_release);
     }
@@ -597,7 +599,8 @@ void GripperCommandThread(flexiv::rdk::Gripper &gripper,
         last_command = command;
       }
     } catch (const std::exception &e) {
-      spdlog::error(std::string("Gripper manager error: ") + e.what());
+      std::cerr << "Gripper manager error: " << e.what() << "\n";
+      spdlog::error("Gripper manager error: {}", e.what());
       running.store(false, std::memory_order_release);
       g_stop_sched.store(true, std::memory_order_release);
     }
@@ -925,6 +928,18 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Model &model) {
 
     // safety checks
     // joint torques, velocity and positions
+    std::string safety_violation_reason;
+    auto record_safety_violation = [&](int joint, const char *description,
+                                       double value, double limit) {
+      if (!safety_violation_reason.empty()) {
+        return;
+      }
+      std::ostringstream msg;
+      msg << description << " on joint " << joint << " (value " << value
+          << ", limit " << limit << ")";
+      safety_violation_reason = msg.str();
+    };
+
     for (int i = 0; i < 7; ++i) {
       // torque saturation
       if (tau_cmd_array[i] > joint_torques_limits[i]) {
@@ -945,6 +960,8 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Model &model) {
       // position limit
       if (robot_state.q[i] > joint_position_max[i]) {
         safety_mode_flag = true;
+        record_safety_violation(i, "upper position limit violation",
+                                robot_state.q[i], joint_position_max[i]);
         if (safety_controller_count == 200) {
           std::cout << "WARNING : Soft joint upper limit violated on joint "
                     << i << ", engaging safety mode" << std::endl;
@@ -952,6 +969,8 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Model &model) {
       }
       if (robot_state.q[i] < joint_position_min[i]) {
         safety_mode_flag = true;
+        record_safety_violation(i, "lower position limit violation",
+                                robot_state.q[i], joint_position_min[i]);
         if (safety_controller_count == 200) {
           std::cout << "WARNING : Soft joint lower limit violated on joint "
                     << i << ", engaging safety mode" << std::endl;
@@ -960,6 +979,9 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Model &model) {
       // velocity limit
       if (abs(robot_state.dq[i]) > joint_velocity_limits[i]) {
         safety_mode_flag = true;
+        record_safety_violation(i, "velocity limit violation",
+                                std::abs(robot_state.dq[i]),
+                                joint_velocity_limits[i]);
         if (safety_controller_count == 200) {
           std::cout << "WARNING : Soft velocity limit violated on joint " << i
                     << ", engaging safety mode" << std::endl;
@@ -1008,7 +1030,11 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Model &model) {
       }
 
       if (safety_controller_count == 0) {
-        throw std::runtime_error("Stopping driver due to safety violation");
+        std::string error = "Stopping driver due to safety violation";
+        if (!safety_violation_reason.empty()) {
+          error += ": " + safety_violation_reason;
+        }
+        throw std::runtime_error(error);
       }
       safety_controller_count--;
     }
@@ -1116,9 +1142,8 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Model &model) {
 
     counter++;
   } catch (const std::exception &e) {
-    std::cout << "Error \n"
-              << "\n";
-    spdlog::error(e.what());
+    std::cout << "PeriodicTask error: " << e.what() << "\n";
+    spdlog::error("PeriodicTask error: {}", e.what());
     g_stop_sched = true;
   }
 }
@@ -1486,7 +1511,8 @@ int main(int argc, char **argv) {
     if (redis_thread.joinable()) {
       redis_thread.join();
     }
-    spdlog::error(e.what());
+    std::cerr << "Driver error: " << e.what() << "\n";
+    spdlog::error("Driver error: {}", e.what());
     return 1;
   }
 
