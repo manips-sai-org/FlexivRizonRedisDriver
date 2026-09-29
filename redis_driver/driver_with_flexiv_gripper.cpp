@@ -64,7 +64,9 @@ const double FREE_DRIVE_THRESHOLD = 6; // n-m norm
 int not_touching_counter = 0;
 const int NOT_TOUCHING_WINDOW = 400; // ms
 const auto kRedisExchangePeriod = std::chrono::microseconds(1000); // 1 kHz
-const auto kGripperCommandPeriod = std::chrono::milliseconds(10); // 100 Hz
+const auto kGripperCommandPeriod = std::chrono::milliseconds(50); // 20 Hz
+const int kGripperTaskPeriodMs = 50; // 20 Hz
+const int kGripperTaskPriority = 1; // minimum Linux real-time priority
 using Vector7d = Eigen::Matrix<double, K_DOF, 1>;
 using Matrix7d = Eigen::Matrix<double, K_DOF, K_DOF>;
 
@@ -614,10 +616,47 @@ void GripperCommandThread(flexiv::rdk::Gripper &gripper,
   }
 }
 
+/** @brief Lower-priority scheduler task that owns all gripper device I/O. */
+void GripperTask(flexiv::rdk::Gripper &gripper) {
+  static Eigen::Vector3d last_command = last_gripper_parameters;
+  static std::array<double, 3> command_array = gripper_parameters_array;
+
+  try {
+    GripperCommandData command_snapshot;
+    if (gripper_command_exchange.try_read(command_snapshot)) {
+      command_array = command_snapshot.gripper_parameters;
+    }
+
+    auto gripper_state = gripper.states();
+    GripperStatusData status_update;
+    status_update.gripper_current_width[0] = gripper_state.width;
+    status_update.gripper_sensed_grasp_force[0] = gripper_state.force;
+    status_update.status_ready = true;
+    gripper_status_exchange.try_publish(status_update);
+
+    Eigen::Vector3d command = Eigen::Map<Eigen::Vector3d>(command_array.data());
+    if ((command - last_command).norm() > 0.001) {
+      double width = command(0);
+      double speed = command(1);
+      double force = command(2);
+      spdlog::info("Moving Gripper - Width: " + std::to_string(width) +
+                   "m    Speed: " + std::to_string(speed) +
+                   "m/s    Force: " + std::to_string(force) + "N");
+      gripper.Stop();
+      gripper.Move(width, speed, force);
+      last_command = command;
+    }
+  } catch (const std::exception &e) {
+    std::cerr << "Gripper task error: " << e.what() << "\n";
+    spdlog::error("Gripper task error: {}", e.what());
+    g_stop_sched.store(true, std::memory_order_release);
+  }
+}
+
 /** @brief Callback function for realtime periodic task */
 void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Model &model) {
 
-  try {
+  // try {
 
     TorqueCommandData torque_command_snapshot;
     if (torque_command_exchange.try_read(torque_command_snapshot)) {
@@ -1138,14 +1177,15 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Model &model) {
 
     // Send target joint torque to RDK server, enable gravity
     // compensation and joint limits soft protection
-    robot.StreamJointTorque(arrayToVector(target_torque), true, true);
+    // robot.StreamJointTorque(arrayToVector(target_torque), true, true);
+    robot.StreamJointTorque(arrayToVector(target_torque), true, false);
 
     counter++;
-  } catch (const std::exception &e) {
-    std::cout << "PeriodicTask error: " << e.what() << "\n";
-    spdlog::error("PeriodicTask error: {}", e.what());
-    g_stop_sched = true;
-  }
+  // } catch (const std::exception &e) {
+  //   std::cout << "PeriodicTask error: " << e.what() << "\n";
+  //   spdlog::error("PeriodicTask error: {}", e.what());
+  //   g_stop_sched = true;
+  // }
 }
 
 int main(int argc, char **argv) {
@@ -1345,6 +1385,7 @@ int main(int argc, char **argv) {
 
   std::atomic<bool> redis_thread_running{false};
   std::thread redis_thread;
+
   std::atomic<bool> gripper_thread_running{false};
   std::thread gripper_thread;
 
@@ -1386,7 +1427,7 @@ int main(int argc, char **argv) {
 
     // Update timeliness error limit to be more relaxed from default. 
     // Limit specified as percentage of allowable missed timepoints
-    robot.SetTimelinessFailureLimit(5.0);
+    robot.SetTimelinessFailureLimit(20.0);
 
     // Switch Mode to Primitive Execution
     robot.SwitchMode(flexiv::rdk::Mode::NRT_PRIMITIVE_EXECUTION);
@@ -1422,7 +1463,9 @@ int main(int argc, char **argv) {
     // Gripper Control
     // =========================================================================================
     // Instantiate gripper control interface
-    rdk::Gripper gripper(robot);
+    flexiv::rdk::Robot robot_lite(driver_config.serial_number,
+                                  {driver_config.computer_ip_address}, true, true);
+    rdk::Gripper gripper(robot_lite);
 
     // Instantiate tool interface. Gripper is categorized as both a device and a
     // tool. The device attribute allows a gripper to be interactively
@@ -1446,6 +1489,13 @@ int main(int argc, char **argv) {
               << "\nmin_vel: " << gripper.params().min_vel
               << "\nmax_vel: " << gripper.params().max_vel << "\n}"
               << std::endl;
+
+    // // Switch Mode to Idle
+    // robot.SwitchMode(flexiv::rdk::Mode::IDLE);
+
+    // // Switch robot tool to gripper so the gravity compensation and TCP location is updated
+    // spdlog::info("Switching robot tool to [{}]", driver_config.gripper_name);
+    // tool.Switch(driver_config.gripper_name);
 
     // User needs to determine if this gripper requires manual initialization
     int choice = 0;
@@ -1486,8 +1536,15 @@ int main(int argc, char **argv) {
     // Add periodic task with 1ms interval and highest applicable
     // priority
     scheduler.AddTask(std::bind(PeriodicTask, std::ref(robot), std::ref(model)),
-                      "HP periodic", 1, driver_config.process_priority,
+                      "HP periodic", 1, scheduler.max_priority(),
                       driver_config.cpu_affinity);
+    // scheduler.AddTask(std::bind(PeriodicTask, std::ref(robot), std::ref(model)),
+    //                   "HP periodic", 1, driver_config.process_priority,
+    //                   driver_config.cpu_affinity);
+    // scheduler.AddTask(std::bind(GripperTask, std::ref(gripper)), "LP gripper",
+    //                   kGripperTaskPeriodMs, scheduler.min_priority(),
+    //                   driver_config.cpu_affinity);
+            
     // Start all added tasks
     scheduler.Start();
 
@@ -1497,21 +1554,13 @@ int main(int argc, char **argv) {
     }
     // Received signal to stop scheduler tasks
     scheduler.Stop();
-    gripper_thread_running.store(false, std::memory_order_release);
     redis_thread_running.store(false, std::memory_order_release);
-    if (gripper_thread.joinable()) {
-      gripper_thread.join();
-    }
     if (redis_thread.joinable()) {
       redis_thread.join();
     }
 
   } catch (const std::exception &e) {
-    gripper_thread_running.store(false, std::memory_order_release);
     redis_thread_running.store(false, std::memory_order_release);
-    if (gripper_thread.joinable()) {
-      gripper_thread.join();
-    }
     if (redis_thread.joinable()) {
       redis_thread.join();
     }

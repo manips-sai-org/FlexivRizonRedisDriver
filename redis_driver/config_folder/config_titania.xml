@@ -6,5 +6,5 @@
                        gripperName="Flexiv-GN01"
                        computerIpAddress="172.16.0.20" 
                        redisPrefix="opensai" 
-                       cpuAffinity="6" 
+                       cpuAffinity="7"
                        processPriority="90"/>

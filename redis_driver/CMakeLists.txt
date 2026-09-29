@@ -55,5 +55,8 @@ include_directories( ${flexiv_rizon4_redis_driver_INCLUDE_DIRS} )
 target_link_libraries(${PROJECT_NAME}_robot_only ${flexiv_rizon4_redis_driver_LIBRARIES})
 target_link_libraries(${PROJECT_NAME}_with_gripper ${flexiv_rizon4_redis_driver_LIBRARIES})
 
+target_compile_options(${PROJECT_NAME}_robot_only PRIVATE -O3)
+target_compile_options(${PROJECT_NAME}_with_gripper PRIVATE -O3)
+
 set(CONFIG_FOLDER "${CMAKE_CURRENT_SOURCE_DIR}/config_folder")
 add_definitions(-DCONFIG_FOLDER="${CONFIG_FOLDER}")
