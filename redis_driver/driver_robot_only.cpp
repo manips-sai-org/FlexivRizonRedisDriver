@@ -19,7 +19,6 @@
 #include <flexiv/rdk/robot.hpp>
 #include <flexiv/rdk/scheduler.hpp>
 #include <flexiv/rdk/utility.hpp>
-#include <spdlog/spdlog.h>
 
 #include <atomic>
 #include <chrono>
@@ -621,7 +620,6 @@ void RedisManagerThread(Sai::Flexiv::CDatabaseRedisClient *redis_client,
             redis_command_exchange.try_publish(command_update);
         } catch (const std::exception &e) {
             std::cerr << "Redis manager error: " << e.what() << "\n";
-            spdlog::error("Redis manager error: {}", e.what());
             running.store(false, std::memory_order_release);
             g_stop_sched.store(true, std::memory_order_release);
         }
@@ -656,23 +654,20 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
         //     gripper_width = gripper_parameters(0);
         //     gripper_speed = gripper_parameters(1);
         //     gripper_force = gripper_parameters(2);
-        //     spdlog::info(
-        //         "Moving Gripper - Width: " + std::to_string(gripper_width) +
-        //         "m    Speed: " + std::to_string(gripper_speed) +
-        //         "m/s    Force: " + std::to_string(gripper_force) + "N");
+        //     std::cout << "Moving Gripper - Width: " << gripper_width << "m    Speed: " << gripper_speed << "m/s    Force: " << gripper_force << "N" << std::endl;
         //     gripper.Move(gripper_width, gripper_speed, gripper_force);
         //     last_gripper_parameters = gripper_parameters;
         // }
 
         // if (gripper_mode != last_gripper_mode) {
         //     if (gripper_mode == "g") {
-        //         spdlog::info("Closing Gripper");
+        //         std::cout << "Closing Gripper" << std::endl;
         //         gripper.Move(0, 0.1, 60);
         //     } else if (gripper_mode == "o") {
-        //         spdlog::info("Opening Gripper");
+        //         std::cout << "Opening Gripper" << std::endl;
         //         gripper.Move(0.05, 0.1, 60);
         //     } else {
-        //         spdlog::info("Invalid Gripper Command");
+        //         std::cout << "Invalid Gripper Command" << std::endl;
         //     }
         //     last_gripper_mode = gripper_mode;
         // }
@@ -1203,8 +1198,7 @@ void PeriodicTask(flexiv::rdk::Robot &robot,
 
         counter++;
     } catch (const std::exception &e) {
-        std::cout << "PeriodicTask error: " << e.what() << "\n";
-        spdlog::error("PeriodicTask error: {}", e.what());
+        std::cerr << "PeriodicTask error: " << e.what() << "\n";
         g_stop_sched = true;
     }
 }
@@ -1401,26 +1395,26 @@ int main(int argc, char **argv) {
 
         // Clear fault on the connected robot if any
         if (robot.fault()) {
-            spdlog::warn("Fault occurred on the connected robot, trying to "
-                         "clear ...");
+            std::cout << "Fault occurred on the connected robot, trying to "
+                         "clear ..." << std::endl;
             // Try to clear the fault
             if (!robot.ClearFault()) {
-                spdlog::error("Fault cannot be cleared, exiting ...");
+                std::cerr << "Fault cannot be cleared, exiting ..." << std::endl;
                 return 1;
             }
-            spdlog::info("Fault on the connected robot is cleared");
+            std::cout << "Fault on the connected robot is cleared" << std::endl;
         }
 
         // Enable the robot, make sure the E-stop is released before
         // enabling
-        spdlog::info("Enabling robot ...");
+        std::cout << "Enabling robot ..." << std::endl;
         robot.Enable();
 
         // Wait for the robot to become operational
         while (!robot.operational()) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
-        spdlog::info("Robot is now operational");
+        std::cout << "Robot is now operational" << std::endl;
 
         // Switch Mode to Primitive Execution
         robot.SwitchMode(flexiv::rdk::Mode::NRT_PRIMITIVE_EXECUTION);
@@ -1435,9 +1429,8 @@ int main(int argc, char **argv) {
         // WARNING: during the process, the robot must not contact anything,
         // otherwise the result will be inaccurate and affect following
         // operations
-        spdlog::info(
-            "Zeroing force/torque sensors, make sure nothing is in contact "
-            "with the robot");
+        std::cout << "Zeroing force/torque sensors, make sure nothing is in contact "
+                     "with the robot" << std::endl;
 
         // Wait for primitive completion
         // while (robot.busy()) {
@@ -1446,7 +1439,7 @@ int main(int argc, char **argv) {
         while (!std::get<int>(robot.primitive_states()["terminated"])) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
-        spdlog::info("Sensor zeroing complete");
+        std::cout << "Sensor zeroing complete" << std::endl;
 
         // // Wait for the primitive to finish
         // while (robot.busy()) {
@@ -1457,13 +1450,13 @@ int main(int argc, char **argv) {
         // flexiv::rdk::Gripper gripper(robot);
 
         // // Manually initialize the gripper, not all grippers need this step
-        // spdlog::info("Initializing gripper, this process takes about 10 "
-        //              "seconds ...");
+        // std::cout << "Initializing gripper, this process takes about 10 "
+        //              "seconds ..." << std::endl;
         // gripper.Init();
         
         // Manual wait for gripper initialization to finish
         std::this_thread::sleep_for(std::chrono::seconds(12));
-        spdlog::info("Initialization complete");
+        std::cout << "Initialization complete" << std::endl;
 
         // Real-time Control
         // =========================================================================================
@@ -1500,7 +1493,6 @@ int main(int argc, char **argv) {
             redis_thread.join();
         }
         std::cerr << "Driver error: " << e.what() << "\n";
-        spdlog::error("Driver error: {}", e.what());
         return 1;
     }
 

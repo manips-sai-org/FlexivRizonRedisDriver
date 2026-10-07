@@ -35,11 +35,15 @@ endif ()
 # - eigen3
 find_package(Eigen3 REQUIRED)
 
+# tinyxml2 (NEEDED for V1.9.4.1 due to new third party package handling in Flexiv RDK)
+find_package(tinyxml2 REQUIRED)
+
 # create headers list
 set(flexiv_rizon4_redis_driver_INCLUDE_DIRS 
     ${EIGEN3_INCLUDE_DIR}
     ${JSONCPP_INCLUDE_DIRS}
 	${HIREDIS_INCLUDE_DIR}
+    ${tinyxml2_INCLUDE_DIRS}
 )
 
 # create libraries list
@@ -47,6 +51,7 @@ set(flexiv_rizon4_redis_driver_LIBRARIES
     flexiv::flexiv_rdk
     ${HIREDIS_LIBRARY}
     ${JSONCPP_LIBRARY}
+    tinyxml2::tinyxml2
     -lrt
     -lpthread
 )

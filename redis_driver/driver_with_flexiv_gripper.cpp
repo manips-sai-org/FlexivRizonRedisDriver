@@ -20,7 +20,6 @@
 #include <flexiv/rdk/scheduler.hpp>
 #include <flexiv/rdk/tool.hpp>
 #include <flexiv/rdk/utility.hpp>
-#include <spdlog/spdlog.h>
 
 #include <atomic>
 #include <chrono>
@@ -550,7 +549,6 @@ void RedisManagerThread(Sai::Flexiv::CDatabaseRedisClient *redis_client,
       gripper_command_exchange.try_publish(gripper_command_update);
     } catch (const std::exception &e) {
       std::cerr << "Redis manager error: " << e.what() << "\n";
-      spdlog::error("Redis manager error: {}", e.what());
       running.store(false, std::memory_order_release);
       g_stop_sched.store(true, std::memory_order_release);
     }
@@ -593,16 +591,13 @@ void GripperCommandThread(flexiv::rdk::Gripper &gripper,
         double width = command(0);
         double speed = command(1);
         double force = command(2);
-        spdlog::info("Moving Gripper - Width: " + std::to_string(width) +
-                     "m    Speed: " + std::to_string(speed) +
-                     "m/s    Force: " + std::to_string(force) + "N");
+        std::cout << "Moving Gripper - Width: " << width << "m    Speed: " << speed << "m/s    Force: " << force << "N" << std::endl;
         gripper.Stop();
         gripper.Move(width, speed, force);
         last_command = command;
       }
     } catch (const std::exception &e) {
       std::cerr << "Gripper manager error: " << e.what() << "\n";
-      spdlog::error("Gripper manager error: {}", e.what());
       running.store(false, std::memory_order_release);
       g_stop_sched.store(true, std::memory_order_release);
     }
@@ -639,16 +634,13 @@ void GripperTask(flexiv::rdk::Gripper &gripper) {
       double width = command(0);
       double speed = command(1);
       double force = command(2);
-      spdlog::info("Moving Gripper - Width: " + std::to_string(width) +
-                   "m    Speed: " + std::to_string(speed) +
-                   "m/s    Force: " + std::to_string(force) + "N");
+      std::cout << "Moving Gripper - Width: " << width << "m    Speed: " << speed << "m/s    Force: " << force << "N" << std::endl;
       gripper.Stop();
       gripper.Move(width, speed, force);
       last_command = command;
     }
   } catch (const std::exception &e) {
     std::cerr << "Gripper task error: " << e.what() << "\n";
-    spdlog::error("Gripper task error: {}", e.what());
     g_stop_sched.store(true, std::memory_order_release);
   }
 }
@@ -1183,7 +1175,6 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Model &model) {
     counter++;
   // } catch (const std::exception &e) {
   //   std::cout << "PeriodicTask error: " << e.what() << "\n";
-  //   spdlog::error("PeriodicTask error: {}", e.what());
   //   g_stop_sched = true;
   // }
 }
@@ -1404,26 +1395,26 @@ int main(int argc, char **argv) {
 
     // Clear fault on the connected robot if any
     if (robot.fault()) {
-      spdlog::warn("Fault occurred on the connected robot, trying to "
-                   "clear ...");
+      std::cerr << "Fault occurred on the connected robot, trying to "
+                   "clear ..." << std::endl;
       // Try to clear the fault
       if (!robot.ClearFault()) {
-        spdlog::error("Fault cannot be cleared, exiting ...");
+        std::cerr << "Fault cannot be cleared, exiting ..." << std::endl;
         return 1;
       }
-      spdlog::info("Fault on the connected robot is cleared");
+      std::cout << "Fault on the connected robot is cleared" << std::endl;
     }
 
     // Enable the robot, make sure the E-stop is released before
     // enabling
-    spdlog::info("Enabling robot ...");
+    std::cout << "Enabling robot ..." << std::endl;
     robot.Enable();
 
     // Wait for the robot to become operational
     while (!robot.operational()) {
       std::this_thread::sleep_for(std::chrono::seconds(1));
     }
-    spdlog::info("Robot is now operational");
+    std::cout << "Robot is now operational" << std::endl;
 
     // Update timeliness error limit to be more relaxed from default. 
     // Limit specified as percentage of allowable missed timepoints
@@ -1442,9 +1433,9 @@ int main(int argc, char **argv) {
     // WARNING: during the process, the robot must not contact anything,
     // otherwise the result will be inaccurate and affect following
     // operations
-    spdlog::info(
-        "Zeroing force/torque sensors, make sure nothing is in contact "
-        "with the robot");
+    std::cout << "Zeroing force/torque sensors, make sure nothing is in contact "
+                 "with the robot"
+              << std::endl;
 
     // Wait for primitive completion
     // while (robot.busy()) {
@@ -1453,7 +1444,7 @@ int main(int argc, char **argv) {
     while (!std::get<int>(robot.primitive_states()["terminated"])) {
       std::this_thread::sleep_for(std::chrono::seconds(1));
     }
-    spdlog::info("Sensor zeroing complete");
+    std::cout << "Sensor zeroing complete" << std::endl;
 
     // // Wait for the primitive to finish
     // while (robot.busy()) {
@@ -1475,11 +1466,11 @@ int main(int argc, char **argv) {
 
     // Enable the specified gripper as a device. This is equivalent to enabling
     // the specified gripper in Flexiv Elements -> Settings -> Device
-    spdlog::info("Enabling gripper [{}]", driver_config.gripper_name);
+    std::cout << "Enabling gripper [ " << driver_config.gripper_name << " ]" << std::endl;
     gripper.Enable(driver_config.gripper_name);
 
     // Print parameters of the enabled gripper
-    spdlog::info("Gripper params:");
+    std::cout << "Gripper params:" << std::endl;
     std::cout << std::fixed << std::setprecision(3) << "{\n"
               << "name: " << gripper.params().name
               << "\nmin_width: " << gripper.params().min_width
@@ -1494,29 +1485,28 @@ int main(int argc, char **argv) {
     // robot.SwitchMode(flexiv::rdk::Mode::IDLE);
 
     // // Switch robot tool to gripper so the gravity compensation and TCP location is updated
-    // spdlog::info("Switching robot tool to [{}]", driver_config.gripper_name);
     // tool.Switch(driver_config.gripper_name);
 
     // User needs to determine if this gripper requires manual initialization
     int choice = 0;
-    spdlog::info("Manually trigger initialization for the gripper now?");
+    std::cout << "Manually trigger initialization for the gripper now?" << std::endl;
     std::cout << "[1] Skip Gripper Initialization" << std::endl;
     std::cout << "[2] Perform Gripper Initialization Now" << std::endl;
     std::cin >> choice;
 
     // Trigger manual initialization based on choice
     if (choice == 1) {
-      spdlog::info("Skipped manual initialization");
+      std::cout << "Skipped manual initialization" << std::endl;
     } else if (choice == 2) {
       gripper.Init();
       // User determines if the manual initialization is finished
-      spdlog::info("Triggered manual initialization, press Enter when the "
+      std::cout << "Triggered manual initialization, press Enter when the "
                    "initialization is finished "
-                   "to continue");
+                   "to continue" << std::endl;
       std::cin.get();
       std::cin.get();
     } else {
-      spdlog::error("Invalid choice");
+      std::cerr << "Invalid choice" << std::endl;
       return 1;
     }
 
@@ -1565,7 +1555,7 @@ int main(int argc, char **argv) {
       redis_thread.join();
     }
     std::cerr << "Driver error: " << e.what() << "\n";
-    spdlog::error("Driver error: {}", e.what());
+    std::cerr << "Driver error: " << e.what() << "\n";
     return 1;
   }
 
