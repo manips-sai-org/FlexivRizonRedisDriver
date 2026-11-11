@@ -65,3 +65,16 @@ target_compile_options(${PROJECT_NAME}_with_gripper PRIVATE -O3)
 
 set(CONFIG_FOLDER "${CMAKE_CURRENT_SOURCE_DIR}/config_folder")
 add_definitions(-DCONFIG_FOLDER="${CONFIG_FOLDER}")
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(flexiv_startup_tests tests/startup_tests.cpp)
+    target_include_directories(flexiv_startup_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(flexiv_startup_tests PRIVATE Eigen3::Eigen)
+    add_test(NAME flexiv_startup_sequence COMMAND flexiv_startup_tests)
+
+    add_executable(flexiv_idle_tests tests/idle_tests.cpp)
+    target_include_directories(flexiv_idle_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(flexiv_idle_tests PRIVATE Eigen3::Eigen)
+    add_test(NAME flexiv_idle_handoff COMMAND flexiv_idle_tests)
+endif()

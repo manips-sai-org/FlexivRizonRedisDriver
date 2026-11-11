@@ -38,6 +38,64 @@ or
 ./build/flexiv_rizon4_redis_driver <config_file_name>
 ```
 
+## Gripper driver startup
+
+The gripper driver completes a startup sequence before accepting controller torques.
+It applies joint-limit recovery torques until every joint is at least 0.5 degrees
+inside the hard avoidance boundaries and stays below 0.02 rad/s for 200 control
+cycles (about 200 ms). Recovery extends beyond the clearance margin so it can
+move the robot out of the hard region. Existing position and velocity stop checks
+remain active throughout startup.
+During clearance, one terminal line refreshes in place with the joints still
+needing clearance, grouped by Hard Min and Hard Max (`J1` through `J7`). The list
+includes the 0.5-degree clearance margin. When all joints clear, the same line
+reports that startup is waiting for motion to settle.
+
+All starting configurations, including `MIN_HARD` and `MAX_HARD`, capture the
+current hold pose automatically after clearance and settling. No Enter key is
+required for startup hold. Losing clearance restarts recovery, pose capture, and
+the full delay before bias sampling.
+
+After capture, startup holding ramps in over 500 control cycles (500 ms), then
+continues at full strength for 1000 cycles (one second) before torque-bias sampling
+starts. Adjust `kStartupBiasDelayMs` in `redis_driver/driver_with_flexiv_gripper.cpp`
+to change this delay; zero skips it. Hold control remains active throughout the
+delay, and those torques are excluded from the bias average. Bias estimation then
+collects 500 consecutive low-velocity samples. The captured pose is
+the goal: each joint uses `dq_goal = clamp((Kp/Kv) * (q_hold - q), -v_max, v_max)`
+and `tau_hold = Kv * (dq_goal - dq)`, with `Kp = 1000`, `Kv = 10`, and
+`v_max = 0.1 rad/s` (`kHoldingVelocityLimit`). This preserves the position PD near
+the goal and limits the position-driven restoring contribution to 1 N m per joint
+for larger errors, while retaining full velocity damping. The velocity limit
+bounds the goal velocity, not the robot's actual speed. The torque ramp,
+pre-sampling delay, and bias estimation all use this holding computation.
+
+Joint-limit avoidance and torque saturation apply after the chosen startup or
+normal controller output.
+The remaining startup settings are in `redis_driver/SaiFlexivStartupController.h`.
+
+## Gripper driver controller shutdown
+
+After startup, seven zero command torques select the driver's idle controller.
+On an active-to-zero transition, it captures the current joint positions and resets
+the 400-cycle idle timer. It blends from the previous nominal controller command
+(including bias and floating damping) into idle control over 200 cycles (200 ms)
+using a smoothstep ramp. Joint-limit avoidance, safety stopping, and final torque
+saturation run after this blend on every cycle.
+
+Idle control follows the current pose with damping for the first 400 cycles
+without detected contact, then holds that pose using a per-joint goal velocity
+clamped to 0.15 rad/s. Its torque is `M_idle * Kv * (dq_goal - dq)`, where
+`M_idle = M + diag(0, 0, 0, 0, 0.15, 0.15, 0.15)`. The added inertia for joints
+5-7 is set by `kWristInertiaOffset` and applies to idle holding and idle damping.
+It uses `Kp = 200` and `Kv = 10`, plus floating damping. Detected contact releases the
+hold and resets the timer. A new active command cancels an unfinished handoff;
+the next stop captures a fresh pose. Settings are in
+`redis_driver/SaiFlexivIdleController.h`.
+
+The handoff requires the controller to publish zeros on shutdown. A forced kill
+that leaves a nonzero command in Redis is not detected by this transition logic.
+
 ## Config file and redis keys
 
 The config file needs to be in the folder `config_folder`. It is an xml file with one `saiFlexivDriverConfig` tag containing the following attributes:

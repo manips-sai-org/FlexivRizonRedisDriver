@@ -7,12 +7,15 @@
 #include <cmath>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 
 #include "SaiFlexivDriverConfig.h"
+#include "SaiFlexivIdleController.h"
 #include "SaiFlexivRedisClientLocal.h"
+#include "SaiFlexivStartupController.h"
 
 #include <flexiv/rdk/gripper.hpp>
 #include <flexiv/rdk/model.hpp>
@@ -60,8 +63,6 @@ const bool USING_4S =
 const bool VERBOSE = true; // print out safety violations
 const int K_DOF = 7;
 const double FREE_DRIVE_THRESHOLD = 6; // n-m norm
-int not_touching_counter = 0;
-const int NOT_TOUCHING_WINDOW = 400; // ms
 const auto kRedisExchangePeriod = std::chrono::microseconds(1000); // 1 kHz
 const auto kGripperCommandPeriod = std::chrono::milliseconds(50); // 20 Hz
 const int kGripperTaskPeriodMs = 50; // 20 Hz
@@ -148,11 +149,11 @@ double gripper_force;
 
 // limit options
 bool _pos_limit_opt = true;
-bool _vel_limit_opt = true;
+bool _vel_limit_opt = false;
 
 // setup joint limit avoidance
-std::vector<int> _pos_limit_flag{7, SAFE};
-std::vector<int> _vel_limit_flag{7, SAFE};
+std::vector<int> _pos_limit_flag(K_DOF, SAFE);
+std::vector<int> _vel_limit_flag(K_DOF, SAFE);
 Matrix7d
     _J_s = Matrix7d::Zero(); // constraint task jacobian storage
 Matrix7d _Lambda_s = Matrix7d::Zero(); // op-space matrix storage
@@ -185,15 +186,17 @@ Vector7d hard_max_joint_velocity_limits;
 
 // initial torque bias
 Vector7d init_torque_bias = Vector7d::Zero();
-int n_samples = 500;
-int n_curr = 0;
-bool initialized_torque_bias = false;
-std::vector<double> kp_holding = {1000, 1000, 1000, 1000, 1000, 1000, 1000};
-std::vector<double> kv_holding = {10, 10, 10, 10, 10, 10, 10};
-std::vector<double> kp_holding_drive = {200, 200, 200, 200, 200, 200, 200};
-std::vector<double> kv_holding_drive = {10, 10, 10, 10, 10, 10, 10};
-Vector7d q_init = Vector7d::Zero();
-bool first_loop = true;
+using StartupController = Sai::Flexiv::StartupController;
+using StartupPhase = StartupController::Phase;
+// Full startup hold time after the torque ramp and before collecting bias samples.
+constexpr int kStartupBiasDelayMs = 1000; // one update per millisecond
+static_assert(kStartupBiasDelayMs >= 0, "Startup bias delay must be nonnegative");
+StartupController startup_controller{kStartupBiasDelayMs}; // owned by PeriodicTask
+std::atomic<StartupPhase> startup_phase{StartupPhase::ClearLimits};
+// One snapshot: lower-joint bits, upper-joint bits, then a valid-state bit.
+constexpr unsigned int kStartupClearanceValidBit = 1u << (2 * K_DOF);
+std::atomic<unsigned int> startup_clearance_status{0};
+Sai::Flexiv::IdleController idle_controller; // owned by PeriodicTask
 
 // timing
 std::clock_t start;
@@ -738,9 +741,71 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Model &model) {
     state_update.state_ready = true;
     robot_state_exchange.try_publish(state_update);
 
+    // Select the desired torque first. Joint-limit avoidance, safety stopping,
+    // and saturation below always act on the final controller output.
+    std::array<double, K_DOF> target_torque = redis_command_storage_array;
+    const bool active_command = std::any_of(
+        redis_command_storage_array.begin(), redis_command_storage_array.end(),
+        [](double torque) { return torque != 0.0; });
+    Vector7d floating_torques;
+    for (int i = 0; i < K_DOF; ++i) {
+      floating_torques(i) = -kFloatingDamping[i] * robot_state.dtheta[i];
+    }
+
+    if (startup_controller.phase() != StartupPhase::Ready) {
+      const StartupController::Limits startup_limits{
+          hard_min_angles, hard_max_angles,
+          Eigen::Map<const Vector7d>(joint_position_min.data()),
+          Eigen::Map<const Vector7d>(joint_position_max.data()),
+          Eigen::Map<const Vector7d>(joint_torques_limits_default.data())};
+      const auto startup_output = startup_controller.update(
+          Eigen::Map<const Vector7d>(q_array.data()),
+          Eigen::Map<const Vector7d>(dq_array.data()), startup_limits,
+          Eigen::Map<const Vector7d>(kv_safety.data()));
+      Eigen::Map<Vector7d>(target_torque.data()) =
+          startup_output.torques + floating_torques;
+      if (startup_output.captured_pose) {
+        idle_controller.reset_hold_pose(startup_controller.hold_pose());
+        init_torque_bias.setZero();
+      }
+      if (startup_output.became_ready) {
+        init_torque_bias = startup_controller.bias();
+      }
+      if (startup_controller.phase() == StartupPhase::ClearLimits) {
+        unsigned int clearance_status = kStartupClearanceValidBit;
+        for (int i = 0; i < K_DOF; ++i) {
+          // Match the startup clearance gate, including its inward margin.
+          if (q_array[i] < hard_min_angles(i) + StartupController::kClearanceMargin) {
+            clearance_status |= 1u << i;
+          }
+          if (q_array[i] > hard_max_angles(i) - StartupController::kClearanceMargin) {
+            clearance_status |= 1u << (K_DOF + i);
+          }
+        }
+        startup_clearance_status.store(clearance_status, std::memory_order_release);
+      }
+      startup_phase.store(startup_controller.phase(), std::memory_order_release);
+    } else {
+      const Vector7d controller_torques =
+          Eigen::Map<const Vector7d>(redis_command_storage_array.data()) + init_torque_bias;
+      const bool touching =
+          (_sensed_torques - gravity_vector).norm() > FREE_DRIVE_THRESHOLD;
+      Eigen::Map<Vector7d>(target_torque.data()) = idle_controller.update(
+          active_command, touching, Eigen::Map<const Vector7d>(q_array.data()),
+          Eigen::Map<const Vector7d>(dq_array.data()), MassMatrix,
+          controller_torques, floating_torques);
+    }
+    tau_cmd_array = target_torque;
+
     // reset containers
     _limited_joints.setZero(); // used to form the constraint jacobian
+    std::fill(_pos_limit_flag.begin(), _pos_limit_flag.end(), SAFE);
+    std::fill(_vel_limit_flag.begin(), _vel_limit_flag.end(), SAFE);
     _N_s.setIdentity();
+
+    // The main thread displays one updating line during startup clearance.
+    const bool clearing_startup_limits =
+        startup_controller.phase() == StartupPhase::ClearLimits;
 
     // position limit saturation
     if (_pos_limit_opt) {
@@ -751,19 +816,27 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Model &model) {
           // std::cout << "joint" << i << " SAFE" << "\n";
         } else if (curr_q < hard_min_angles(i)) {
           _pos_limit_flag[i] = MIN_HARD;
-          std::cout << "joint" << i << "MIN_HARD" << "\n";
+          if (!clearing_startup_limits) {
+            std::cout << "joint" << i << "MIN_HARD" << "\n";
+          }
           _limited_joints(i) = 1;
         } else if (curr_q < soft_min_angles(i)) {
           _pos_limit_flag[i] = MIN_SOFT;
-          std::cout << "joint" << i << "MIN_SOFT" << "\n";
+          if (!clearing_startup_limits) {
+            std::cout << "joint" << i << "MIN_SOFT" << "\n";
+          }
           _limited_joints(i) = 1;
         } else if (curr_q > hard_max_angles(i)) {
           _pos_limit_flag[i] = MAX_HARD;
-          std::cout << "joint" << i << "MAX_HARD" << "\n";
+          if (!clearing_startup_limits) {
+            std::cout << "joint" << i << "MAX_HARD" << "\n";
+          }
           _limited_joints(i) = 1;
         } else if (curr_q > soft_max_angles(i)) {
           _pos_limit_flag[i] = MAX_SOFT;
-          std::cout << "joint" << i << "MAX_SOFT" << "\n";
+          if (!clearing_startup_limits) {
+            std::cout << "joint" << i << "MAX_SOFT" << "\n";
+          }
           _limited_joints(i) = 1;
         }
       }
@@ -797,7 +870,7 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Model &model) {
     }
 
     // safety verbose output
-    if (driver_config.verbose) {
+    if (driver_config.verbose && !clearing_startup_limits) {
       for (int i = 0; i < 7; ++i) {
         if (_pos_limit_flag[i] != SAFE) {
           std::cout << counter << ": Joint " << i
@@ -972,22 +1045,6 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Model &model) {
     };
 
     for (int i = 0; i < 7; ++i) {
-      // torque saturation
-      if (tau_cmd_array[i] > joint_torques_limits[i]) {
-        std::cout << "WARNING : Torque commanded on joint " << i
-                  << " too high (" << tau_cmd_array[i];
-        std::cout << "), saturating to max value(" << joint_torques_limits[i]
-                  << ")" << std::endl;
-        tau_cmd_array[i] = joint_torques_limits[i];
-      }
-
-      if (tau_cmd_array[i] < -joint_torques_limits[i]) {
-        std::cout << "WARNING : Torque commanded on joint " << i << " too low ("
-                  << tau_cmd_array[i];
-        std::cout << "), saturating to min value(" << -joint_torques_limits[i]
-                  << ")" << std::endl;
-        tau_cmd_array[i] = -joint_torques_limits[i];
-      }
       // position limit
       if (robot_state.q[i] > joint_position_max[i]) {
         safety_mode_flag = true;
@@ -1076,101 +1133,28 @@ void PeriodicTask(flexiv::rdk::Robot &robot, flexiv::rdk::Model &model) {
                                "connected robot, exiting ...");
     }
 
-    // Set joint torques to command torques from Redis
-    std::array<double, K_DOF> target_torque = tau_cmd_array;
+    // Clamp the command that will actually be streamed, including safety damping.
+    for (int i = 0; i < K_DOF; ++i) {
+      // torque saturation
+      if (tau_cmd_array[i] > joint_torques_limits[i]) {
+        std::cout << "WARNING : Torque commanded on joint " << i
+                  << " too high (" << tau_cmd_array[i];
+        std::cout << "), saturating to max value(" << joint_torques_limits[i]
+                  << ")" << std::endl;
+        tau_cmd_array[i] = joint_torques_limits[i];
+      }
 
-    bool active_command = false;
-    for (int i = 0; i < 7; ++i) {
-      if (redis_command_storage_array[i] != 0) {
-        active_command = true;
+      if (tau_cmd_array[i] < -joint_torques_limits[i]) {
+        std::cout << "WARNING : Torque commanded on joint " << i << " too low ("
+                  << tau_cmd_array[i];
+        std::cout << "), saturating to min value(" << -joint_torques_limits[i]
+                  << ")" << std::endl;
+        tau_cmd_array[i] = -joint_torques_limits[i];
       }
     }
 
-    // Set 0 joint toruqes
-    // std::array<double, K_DOF> target_torque = {};
-
-    // Initialization at the start
-    if (!initialized_torque_bias) {
-      if (first_loop) {
-        for (int i = 0; i < 7; ++i) {
-          q_init(i) = robot_state.q[i];
-        }
-      }
-      first_loop = false;
-
-      for (int i = 0; i < 7; ++i) {
-        target_torque[i] = -kp_holding[i] * (robot_state.q[i] - q_init(i)) -
-                           kv_holding[i] * robot_state.dq[i];
-        init_torque_bias(i) += (1. / n_samples) * target_torque[i];
-      }
-
-      if (n_curr > n_samples) {
-        initialized_torque_bias = true;
-        std::cout << "Initial torque bias: " << init_torque_bias.transpose()
-                  << "\n";
-      }
-      n_curr++;
-
-    } else if (!active_command) {
-
-      if ((_sensed_torques - gravity_vector).norm() > FREE_DRIVE_THRESHOLD) {
-        not_touching_counter = 0;
-
-        // redis_client->setCommandIs(
-        //     SAI_DEBUG_KEY, "From Driver - Robot Touch Detected - Floating");
-        // active drive
-        for (int i = 0; i < 7; ++i) {
-          q_init(i) = robot_state.q[i];
-          // target_torque[i] += init_torque_bias(i);
-        }
-      } else {
-
-        not_touching_counter++;
-
-        if (not_touching_counter > NOT_TOUCHING_WINDOW) {
-          // position hold if not touching
-          // redis_client->setCommandIs(
-          //     SAI_DEBUG_KEY, "From Driver - No Touch Detected, Holding");
-          for (int i = 0; i < 7; ++i) {
-            target_torque[i] =
-                -kp_holding_drive[i] * (robot_state.q[i] - q_init(i)) -
-                kv_holding_drive[i] * robot_state.dq[i];
-          }
-        } else {
-          for (int i = 0; i < 7; ++i) {
-            q_init(i) = robot_state.q[i];
-            // target_torque[i] += init_torque_bias(i);
-            target_torque[i] = -kv_holding_drive[i] * robot_state.dq[i];
-          }
-        }
-      }
-
-      // multiply by mass matrix
-      Vector7d holding_torques = Vector7d::Zero();
-      for (int i = 0; i < 7; ++i) {
-        holding_torques(i) = target_torque[i];
-      }
-      Vector7d decoupled_holding_torques = MassMatrix * holding_torques;
-      for (int i = 0; i < 7; ++i) {
-        target_torque[i] = decoupled_holding_torques(i);
-      }
-
-    } else {
-      for (int i = 0; i < 7; ++i) {
-        target_torque[i] += init_torque_bias(i);
-      }
-    }
-
-    // Add some velocity damping
-    for (size_t i = 0; i < K_DOF; ++i) {
-      target_torque[i] += -kFloatingDamping[i] * robot_state.dtheta[i];
-      // std::cout << target_torque[i] << "\n";
-    }
-
-    // Send target joint torque to RDK server, enable gravity
-    // compensation and joint limits soft protection
-    // robot.StreamJointTorque(arrayToVector(target_torque), true, true);
-    robot.StreamJointTorque(arrayToVector(target_torque), true, false);
+    // Stream the protected command with robot gravity compensation enabled.
+    robot.StreamJointTorque(arrayToVector(tau_cmd_array), true, false);
 
     counter++;
   // } catch (const std::exception &e) {
@@ -1418,7 +1402,7 @@ int main(int argc, char **argv) {
 
     // Update timeliness error limit to be more relaxed from default. 
     // Limit specified as percentage of allowable missed timepoints
-    robot.SetTimelinessFailureLimit(20.0);
+    robot.SetTimelinessFailureLimit(5.0);
 
     // Switch Mode to Primitive Execution
     robot.SwitchMode(flexiv::rdk::Mode::NRT_PRIMITIVE_EXECUTION);
@@ -1493,6 +1477,7 @@ int main(int argc, char **argv) {
     std::cout << "[1] Skip Gripper Initialization" << std::endl;
     std::cout << "[2] Perform Gripper Initialization Now" << std::endl;
     std::cin >> choice;
+    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 
     // Trigger manual initialization based on choice
     if (choice == 1) {
@@ -1503,8 +1488,8 @@ int main(int argc, char **argv) {
       std::cout << "Triggered manual initialization, press Enter when the "
                    "initialization is finished "
                    "to continue" << std::endl;
-      std::cin.get();
-      std::cin.get();
+      std::string initialization_complete;
+      std::getline(std::cin, initialization_complete);
     } else {
       std::cerr << "Invalid choice" << std::endl;
       return 1;
@@ -1538,9 +1523,79 @@ int main(int argc, char **argv) {
     // Start all added tasks
     scheduler.Start();
 
-    // Block and wait for signal to stop scheduler tasks
+    // Report startup progress on the main thread while torque streaming continues.
+    StartupPhase last_startup_phase = StartupPhase::Ready;
+    bool clearance_line_visible = false;
     while (!g_stop_sched) {
+      const StartupPhase phase = startup_phase.load(std::memory_order_acquire);
+      if (phase != last_startup_phase) {
+        if (clearance_line_visible) {
+          std::cout << '\n';
+          clearance_line_visible = false;
+        }
+        switch (phase) {
+        case StartupPhase::ClearLimits:
+          break;
+        case StartupPhase::RampHold:
+          std::cout << "Startup: pose captured; ramping into position hold.\n";
+          break;
+        case StartupPhase::HoldBeforeBias:
+          std::cout << "Startup: holding position for " << kStartupBiasDelayMs
+                    << " ms before torque-bias sampling.\n";
+          break;
+        case StartupPhase::EstimateBias:
+          std::cout << "Startup: estimating torque bias. Keep the robot still "
+                       "and free of contact.\n";
+          break;
+        case StartupPhase::Ready:
+          std::cout << "Startup complete. Initial torque bias: "
+                    << init_torque_bias.transpose() << std::endl;
+          break;
+        }
+        last_startup_phase = phase;
+      }
+      if (phase == StartupPhase::ClearLimits) {
+        const unsigned int clearance_status =
+            startup_clearance_status.load(std::memory_order_acquire);
+        constexpr unsigned int joint_mask = (1u << K_DOF) - 1u;
+        const unsigned int min_joints = clearance_status & joint_mask;
+        const unsigned int max_joints = (clearance_status >> K_DOF) & joint_mask;
+        std::ostringstream line;
+        if (!(clearance_status & kStartupClearanceValidBit)) {
+          line << "Startup: waiting for joint positions...";
+        } else if (min_joints == 0 && max_joints == 0) {
+          line << "Startup: joint limits cleared; waiting for motion to settle...";
+        } else {
+          const auto append_joints = [&line](unsigned int mask) {
+            line << '[';
+            bool first = true;
+            for (int i = 0; i < K_DOF; ++i) {
+              if (mask & (1u << i)) {
+                if (!first) {
+                  line << ',';
+                }
+                line << 'J' << i + 1;
+                first = false;
+              }
+            }
+            if (first) {
+              line << '-';
+            }
+            line << ']';
+          };
+          line << "Startup: clear Hard Min ";
+          append_joints(min_joints);
+          line << "; Hard Max ";
+          append_joints(max_joints);
+        }
+        // Return to column one and erase stale text when the list gets shorter.
+        std::cout << "\r\033[2K" << line.str() << std::flush;
+        clearance_line_visible = true;
+      }
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (clearance_line_visible) {
+      std::cout << std::endl;
     }
     // Received signal to stop scheduler tasks
     scheduler.Stop();
